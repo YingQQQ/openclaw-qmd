@@ -1,161 +1,152 @@
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import plugin from "../index.js";
-
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  openDatabase,
+  ensureSchema,
+  insertContent,
+  insertDocument,
+  hashContent,
+} from "../src/qmd-lite.js";
 
 type RegisteredTool = {
   name: string;
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<any>;
 };
 
-function registerTools(pluginConfig: Record<string, unknown>) {
+function createTempDir() {
+  return mkdtempSync(path.join(tmpdir(), "plugin-test-"));
+}
+
+async function createTestDb(dir: string) {
+  const dbPath = path.join(dir, "test.sqlite");
+  const db = await openDatabase(dbPath);
+  ensureSchema(db);
+  return { dbPath, db };
+}
+
+function insertTestDoc(
+  db: Awaited<ReturnType<typeof openDatabase>>,
+  collection: string,
+  docPath: string,
+  title: string,
+  body: string,
+) {
+  const hash = hashContent(body);
+  const now = new Date().toISOString();
+  insertContent(db, hash, body, now);
+  insertDocument(db, collection, docPath, title, hash, now, now);
+}
+
+async function registerToolsAsync(pluginConfig: Record<string, unknown>) {
   const tools = new Map<string, RegisteredTool>();
+  const hooks = new Map<string, Function>();
+
+  // register() triggers async initialization; we need to wait for it
+  let resolveReady: () => void;
+  const ready = new Promise<void>((r) => (resolveReady = r));
+
+  const originalThen = Promise.prototype.then;
+
   (plugin as any).register({
     pluginConfig,
     logger: console,
     registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
+      // Once qmd tools are registered, signal ready
+      if (tools.has("qmd_status")) {
+        resolveReady!();
+      }
+    },
+    on(event: string, handler: Function) {
+      hooks.set(event, handler);
     },
   });
-  return tools;
+
+  // Wait for async tool registration (with timeout)
+  await Promise.race([
+    ready,
+    new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error("Tool registration timed out")), 5000),
+    ),
+  ]);
+
+  return { tools, hooks };
 }
 
-function createEchoCommand() {
-  const dir = mkdtempSync(path.join(tmpdir(), "openclaw-qmd-script-"));
-  const scriptPath = path.join(dir, "fake-qmd");
-  writeFileSync(
-    scriptPath,
-    [
-      "#!/usr/bin/env node",
-      "console.log(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));",
-    ].join("\n"),
-  );
-  chmodSync(scriptPath, 0o755);
-  return scriptPath;
-}
+describe("plugin tool registration", () => {
+  it("registers qmd tools when database exists", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "test.md", "Test", "test content");
 
-function createTempDir(prefix: string) {
-  const dir = mkdtempSync(path.join(tmpdir(), prefix));
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
+    const { tools } = await registerToolsAsync({ dbPath });
 
-afterEach(() => {
-  // No-op: temp files live under /tmp and are fine to expire naturally.
-});
-
-describe("plugin tool mapping", () => {
-  it("maps qmd_status to the expected cli invocation", async () => {
-    const command = createEchoCommand();
-    const defaultCwd = createTempDir("openclaw-qmd-cwd-");
-    const tools = registerTools({
-      command,
-      cwd: defaultCwd,
-      indexName: "unit",
-      timeoutMs: 1000,
-    });
-
-    const result = await tools.get("qmd_status")!.execute("call-1", {});
-    expect(result.details).toEqual({
-      argv: ["--index", "unit", "status"],
-      cwd: defaultCwd,
-    });
+    expect(tools.has("qmd_status")).toBe(true);
+    expect(tools.has("qmd_query")).toBe(true);
+    expect(tools.has("qmd_get")).toBe(true);
+    expect(tools.has("qmd_multi_get")).toBe(true);
   });
 
-  it("maps qmd_query structured searches and flags correctly", async () => {
-    const command = createEchoCommand();
-    const defaultCwd = createTempDir("openclaw-qmd-cwd-");
-    const overrideCwd = createTempDir("openclaw-qmd-cwd-");
-    const tools = registerTools({
-      command,
-      cwd: defaultCwd,
-      indexName: "unit",
-      timeoutMs: 1000,
+  it("qmd_query returns results from database", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "auth.md", "Auth", "JWT with refresh token rotation");
+
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_query")!.execute("call-1", {
+      query: "JWT auth",
+      limit: 5,
     });
 
-    const result = await tools.get("qmd_query")!.execute("call-2", {
-      searches: [
-        { type: "lex", query: "auth -redis" },
-        { type: "vec", query: "how auth works" },
-      ],
-      collections: ["notes", "docs"],
-      limit: 7,
-      minScore: 0.2,
-      full: true,
-      lineNumbers: true,
-      cwd: overrideCwd,
-    });
-
-    expect(result.details).toEqual({
-      argv: [
-        "--index",
-        "unit",
-        "query",
-        "lex: auth -redis\nvec: how auth works",
-        "--json",
-        "-n",
-        "7",
-        "--min-score",
-        "0.2",
-        "--full",
-        "--line-numbers",
-        "--collection",
-        "notes",
-        "--collection",
-        "docs",
-      ],
-      cwd: overrideCwd,
-    });
+    expect(result.isError).toBeUndefined();
+    expect(result.details.length).toBeGreaterThan(0);
+    expect(result.details[0].content).toContain("JWT");
   });
 
-  it("returns a validation error when qmd_query has no query input", async () => {
-    const command = createEchoCommand();
-    const tools = registerTools({
-      command,
-      timeoutMs: 1000,
-    });
+  it("qmd_query returns error when no query provided", async () => {
+    const dir = createTempDir();
+    const { dbPath } = await createTestDb(dir);
 
-    const result = await tools.get("qmd_query")!.execute("call-3", {});
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_query")!.execute("call-2", {});
 
     expect(result.isError).toBe(true);
     expect(result.details).toEqual({ reason: "missing_query" });
   });
 
-  it("maps qmd_get and qmd_multi_get to qmd cli arguments", async () => {
-    const command = createEchoCommand();
-    const getCwd = createTempDir("openclaw-qmd-cwd-");
-    const multiCwd = createTempDir("openclaw-qmd-cwd-");
-    const tools = registerTools({
-      command,
-      timeoutMs: 1000,
+  it("qmd_get reads document content", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "auth.md", "Auth Design", "line1\nline2\nline3");
+
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_get")!.execute("call-3", {
+      file: "qmd://notes/auth.md",
     });
 
-    const getResult = await tools.get("qmd_get")!.execute("call-4", {
-      file: "qmd://notes/a.md",
-      fromLine: 5,
-      maxLines: 10,
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("line1");
+    expect(result.content[0].text).toContain("notes/auth.md");
+  });
+
+  it("qmd_get supports line range and line numbers", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "code.md", "Code", "a\nb\nc\nd\ne");
+
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_get")!.execute("call-4", {
+      file: "qmd://notes/code.md",
+      fromLine: 2,
+      maxLines: 2,
       lineNumbers: true,
-      cwd: getCwd,
     });
 
-    expect(getResult.details).toEqual({
-      argv: ["get", "qmd://notes/a.md", "--from", "5", "-l", "10", "--line-numbers"],
-      cwd: getCwd,
-    });
-
-    const multiResult = await tools.get("qmd_multi_get")!.execute("call-5", {
-      pattern: "*.md",
-      maxLines: 20,
-      maxBytes: 4096,
-      lineNumbers: true,
-      cwd: multiCwd,
-    });
-
-    expect(multiResult.details).toEqual({
-      argv: ["multi-get", "*.md", "--json", "-l", "20", "--max-bytes", "4096", "--line-numbers"],
-      cwd: multiCwd,
-    });
+    expect(result.content[0].text).toContain("2: b");
+    expect(result.content[0].text).toContain("3: c");
+    expect(result.content[0].text).not.toContain("4: d");
   });
 });

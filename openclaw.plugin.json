@@ -1,0 +1,79 @@
+{
+  "id": "qmd",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "indexName": {
+        "type": "string",
+        "description": "Optional qmd index name."
+      },
+      "dbPath": {
+        "type": "string",
+        "description": "Override path to qmd SQLite database."
+      },
+      "configDir": {
+        "type": "string",
+        "description": "Override path to qmd config directory."
+      },
+      "memoryDir": {
+        "type": "string",
+        "description": "Directory for memory markdown files. Enables memory features when set."
+      },
+      "autoRecallLimit": {
+        "type": "number",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 20,
+        "description": "Maximum memories to recall per prompt."
+      },
+      "autoRecallMinScore": {
+        "type": "number",
+        "default": 0.3,
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Minimum relevance score for recall."
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically capture facts/decisions from conversations."
+      }
+    }
+  },
+  "uiHints": {
+    "memoryDir": {
+      "label": "Memory Directory",
+      "placeholder": "~/.openclaw/memory/qmd",
+      "help": "Directory for memory markdown files. Enables memory features when set."
+    },
+    "dbPath": {
+      "label": "QMD Database Path",
+      "placeholder": "~/.cache/qmd/index.sqlite",
+      "advanced": true
+    },
+    "indexName": {
+      "label": "QMD Index Name",
+      "placeholder": "index",
+      "advanced": true
+    },
+    "configDir": {
+      "label": "QMD Config Directory",
+      "placeholder": "~/.config/qmd",
+      "advanced": true
+    },
+    "autoRecallLimit": {
+      "label": "Auto-Recall Limit",
+      "advanced": true
+    },
+    "autoRecallMinScore": {
+      "label": "Auto-Recall Min Score",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from conversations."
+    }
+  }
+}

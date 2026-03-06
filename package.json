@@ -2,7 +2,7 @@
   "name": "openclaw-qmd",
   "version": "0.1.0",
   "private": true,
-  "description": "OpenClaw plugin for integrating the local qmd CLI.",
+  "description": "OpenClaw plugin for querying a local qmd knowledge base (direct SQLite access) with memory backend.",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -10,10 +10,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.48"
+    "@sinclair/typebox": "^0.34.48",
+    "better-sqlite3": "^12.6.2",
+    "picomatch": "^4.0.3",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.6.0",
+    "@types/picomatch": "^4.0.2",
     "openclaw": "^2026.3.2",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
