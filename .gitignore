@@ -1,0 +1,9 @@
+node_modules/
+dist/
+skills-lock.json
+
+.agents/
+
+.qmd-local/
+
+.qmd-test/
