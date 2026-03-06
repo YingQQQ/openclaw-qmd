@@ -3,7 +3,7 @@ dist/
 skills-lock.json
 
 .agents/
+.claude/
 
 .qmd-local/
-
 .qmd-test/
