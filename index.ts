@@ -57,6 +57,30 @@ const pluginConfigSchema = Type.Object({
       description: "Automatically capture facts/decisions from conversations.",
     }),
   ),
+  captureMode: Type.Optional(
+    Type.Union([Type.Literal("semantic"), Type.Literal("keyword")], {
+      default: "keyword",
+      description: "Capture mode: 'semantic' captures all non-noise text; 'keyword' uses trigger patterns.",
+    }),
+  ),
+  captureMaxLength: Type.Optional(
+    Type.Number({
+      default: 500,
+      minimum: 50,
+      maximum: 10000,
+      description: "Maximum text length for auto-capture.",
+    }),
+  ),
+  scope: Type.Optional(
+    Type.String({
+      description: "Memory scope (e.g. 'global', 'project:<path>'). Isolates memories by scope.",
+    }),
+  ),
+  learningsDir: Type.Optional(
+    Type.String({
+      description: "Directory for agent self-improvement files (LEARNINGS.md, ERRORS.md).",
+    }),
+  ),
 });
 
 type PluginConfig = Static<typeof pluginConfigSchema>;
@@ -168,12 +192,15 @@ function resolveConfig(pluginConfig: unknown): PluginConfig {
     autoRecallLimit: input.autoRecallLimit ?? 5,
     autoRecallMinScore: input.autoRecallMinScore ?? 0.3,
     autoCapture: input.autoCapture ?? true,
+    captureMode: input.captureMode ?? "keyword",
+    captureMaxLength: input.captureMaxLength ?? 500,
+    scope: input.scope,
+    learningsDir: input.learningsDir,
   };
 }
 
 function buildQueryText(params: Static<typeof queryParameters>): string {
   if (params.searches?.length) {
-    // Only lex queries are supported; vec/hyde need LLM
     const lexQueries = params.searches.filter((s) => s.type === "lex");
     if (lexQueries.length > 0) {
       return lexQueries.map((s) => s.query).join(" ");
@@ -220,7 +247,7 @@ const memoryWriteParameters = Type.Object({
   }),
   category: Type.Optional(
     Type.String({
-      description: "Category like 'decision', 'fact', 'preference'.",
+      description: "Category: profile, preference, entity, event, case, pattern.",
     }),
   ),
   tags: Type.Optional(
@@ -235,12 +262,25 @@ const memoryWriteParameters = Type.Object({
   ),
 });
 
+const memoryForgetParameters = Type.Object({
+  id: Type.Optional(
+    Type.String({
+      description: "Exact memory id to delete.",
+    }),
+  ),
+  query: Type.Optional(
+    Type.String({
+      description: "Search query to find memory to delete.",
+    }),
+  ),
+});
+
 function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, store: MemoryStore) {
   api.registerTool(
     {
       name: "memory_search",
       label: "Memory Search",
-      description: "Semantically search stored memories.",
+      description: "Search stored memories using BM25 full-text search.",
       parameters: memorySearchParameters,
       async execute(_id, params) {
         const results = await store.search(
@@ -272,7 +312,6 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       async execute(_id, params) {
         const entry = await store.get(params.id as string);
         if (!entry) {
-          // Graceful degradation: return empty text instead of error (per OpenClaw spec)
           return {
             content: [{ type: "text", text: "" }],
             details: { text: "", path: params.id },
@@ -291,7 +330,7 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
     {
       name: "memory_write",
       label: "Memory Write",
-      description: "Write a new memory entry.",
+      description: "Write a new memory entry. Automatically deduplicates (skip/update/merge) against existing memories.",
       parameters: memoryWriteParameters,
       async execute(_id, params) {
         const entry = await store.write(
@@ -309,13 +348,78 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
     { optional: true },
   );
 
+  api.registerTool(
+    {
+      name: "memory_forget",
+      label: "Memory Forget",
+      description: "Delete a memory by id, or search for a memory to delete.",
+      parameters: memoryForgetParameters,
+      async execute(_id, params) {
+        const directId = params.id as string | undefined;
+        if (directId) {
+          const deleted = await store.delete(directId);
+          if (deleted) {
+            return {
+              content: [{ type: "text", text: `Forgotten: ${directId}` }],
+              details: { action: "deleted", id: directId },
+            };
+          }
+          return {
+            content: [{ type: "text", text: `Memory not found: ${directId}` }],
+            details: { action: "not_found", id: directId },
+          };
+        }
+
+        const query = params.query as string | undefined;
+        if (!query) {
+          return {
+            content: [{ type: "text", text: "Provide id or query." }],
+            details: { error: "missing_param" },
+          };
+        }
+
+        const candidates = await store.search(query, 5, 0.3);
+        if (!candidates.length) {
+          return {
+            content: [{ type: "text", text: "No matching memories found." }],
+            details: { action: "none" },
+          };
+        }
+
+        // 高分单一匹配自动删除
+        if (candidates.length === 1 && candidates[0].score >= 0.85) {
+          const deleted = await store.delete(candidates[0].id);
+          return {
+            content: [{ type: "text", text: deleted ? `Forgotten: ${candidates[0].id}` : `Failed to delete: ${candidates[0].id}` }],
+            details: { action: deleted ? "deleted" : "failed", id: candidates[0].id },
+          };
+        }
+
+        // 多条候选：返回列表
+        const list = candidates
+          .map((c) => `- ${c.id} (${(c.score * 100).toFixed(0)}%) [${c.category ?? "memory"}] ${c.content.slice(0, 80)}`)
+          .join("\n");
+        return {
+          content: [{ type: "text", text: `Found ${candidates.length} candidates. Specify id:\n${list}` }],
+          details: { action: "candidates", candidates },
+        };
+      },
+    },
+    { optional: true },
+  );
+
   api.on("before_prompt_build", createRecallHook(store, {
     autoRecallLimit: config.autoRecallLimit!,
     autoRecallMinScore: config.autoRecallMinScore!,
+    learningsDir: config.learningsDir,
   }));
 
   if (config.autoCapture) {
-    api.on("agent_end", createCaptureHook(store));
+    api.on("agent_end", createCaptureHook(store, {
+      captureMode: config.captureMode,
+      captureMaxLength: config.captureMaxLength,
+      learningsDir: config.learningsDir,
+    }));
   }
 }
 
@@ -509,12 +613,12 @@ const plugin = {
   id: "qmd",
   name: "QMD",
   kind: "memory" as const,
-  description: "OpenClaw plugin for querying a local qmd knowledge base with optional memory backend.",
+  description: "OpenClaw plugin for querying a local qmd knowledge base with memory backend.",
   configSchema: pluginConfigSchema,
   register(api: OpenClawPluginApi) {
     const config = resolveConfig(api.pluginConfig);
 
-    // 初始化 qmd reader（直接读取 qmd 的 SQLite 数据库，无需 CLI）
+    // 初始化 qmd reader
     createQmdReader({
       indexName: config.indexName,
       dbPath: config.dbPath,
@@ -522,7 +626,6 @@ const plugin = {
     }).then((reader) => {
       registerQmdTools(api, reader);
     }).catch((err) => {
-      // qmd 数据库不存在时静默跳过，只注册 memory 功能
       if (String(err).includes("SQLITE_CANTOPEN") || String(err).includes("ENOENT")) {
         return;
       }
@@ -533,6 +636,7 @@ const plugin = {
     if (config.memoryDir) {
       createMemoryStore({
         memoryDir: config.memoryDir,
+        scope: config.scope,
       }).then((store) => {
         registerMemoryFeatures(api, config, store);
       });

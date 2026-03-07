@@ -1,0 +1,180 @@
+/**
+ * Session reflection: extract structured experience from conversations at agent_end.
+ */
+
+export type ReflectionEntry = {
+  type: "decision" | "user_model" | "lesson" | "invariant";
+  content: string;
+  confidence: number; // 0-1
+};
+
+export type ReflectionResult = {
+  entries: ReflectionEntry[];
+  sessionLength: number; // message turns
+};
+
+/** Minimum session length to trigger reflection */
+const MIN_SESSION_LENGTH = 10;
+
+// ---------------------------------------------------------------------------
+// Pattern definitions
+// ---------------------------------------------------------------------------
+
+const DECISION_PATTERNS = [
+  /(?:decided|chosen|going with|will use|选择了?|决定了?|采用了?)\s+(.{10,120})/i,
+  /(?:let's|we'll|we should|我们?(?:应该|要))\s+(.{10,120})/i,
+];
+
+const USER_MODEL_PATTERNS = [
+  /(?:i prefer|i like|i want|i need|i always|我(?:喜欢|偏好|习惯|总是|需要))\s+(.{5,120})/i,
+  /(?:don't|never|avoid|不要|别|避免)\s+(.{5,80})/i,
+];
+
+const LESSON_PATTERNS = [
+  /(?:the (?:issue|problem|bug|error) was|(?:问题|错误|bug)(?:是|在于))\s+(.{10,200})/i,
+  /(?:fixed by|solved by|(?:通过|靠).*(?:解决|修复))\s+(.{10,200})/i,
+  /(?:turns out|it was because|原来是?|因为)\s+(.{10,200})/i,
+];
+
+const INVARIANT_PATTERNS = [
+  /(?:always|never|must|should always|必须|一定要|永远不要)\s+(.{5,120})/i,
+  /(?:remember to|don't forget|注意|记住)\s+(.{5,120})/i,
+];
+
+// ---------------------------------------------------------------------------
+// Jaccard similarity
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute Jaccard similarity between two strings.
+ * Chinese text is split by character; other text is split by whitespace.
+ */
+export function jaccardSimilarity(a: string, b: string): number {
+  const tokenize = (s: string): Set<string> => {
+    const tokens = new Set<string>();
+    // Split into segments: Chinese characters individually, others by whitespace
+    const parts = s.toLowerCase().match(/[\u4e00-\u9fff]|[^\s\u4e00-\u9fff]+/g);
+    if (parts) {
+      for (const p of parts) {
+        tokens.add(p);
+      }
+    }
+    return tokens;
+  };
+
+  const setA = tokenize(a);
+  const setB = tokenize(b);
+
+  if (setA.size === 0 && setB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const t of setA) {
+    if (setB.has(t)) intersection++;
+  }
+
+  const union = new Set([...setA, ...setB]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+type PatternGroup = {
+  type: ReflectionEntry["type"];
+  patterns: RegExp[];
+  role: "assistant" | "user";
+};
+
+const PATTERN_GROUPS: PatternGroup[] = [
+  { type: "decision", patterns: DECISION_PATTERNS, role: "assistant" },
+  { type: "user_model", patterns: USER_MODEL_PATTERNS, role: "user" },
+  { type: "lesson", patterns: LESSON_PATTERNS, role: "assistant" },
+  { type: "invariant", patterns: INVARIANT_PATTERNS, role: "assistant" },
+];
+
+function getMessageRole(msg: unknown): string | undefined {
+  if (typeof msg === "object" && msg !== null && "role" in msg) {
+    return (msg as { role: string }).role;
+  }
+  return undefined;
+}
+
+function getMessageContent(msg: unknown): string {
+  if (typeof msg === "object" && msg !== null && "content" in msg) {
+    const c = (msg as { content: unknown }).content;
+    if (typeof c === "string") return c;
+  }
+  return "";
+}
+
+function deduplicate(entries: ReflectionEntry[]): ReflectionEntry[] {
+  const result: ReflectionEntry[] = [];
+  for (const entry of entries) {
+    let dominated = false;
+    for (let i = 0; i < result.length; i++) {
+      if (result[i].type === entry.type) {
+        const sim = jaccardSimilarity(result[i].content, entry.content);
+        if (sim > 0.8) {
+          // Keep the one with higher confidence
+          if (entry.confidence > result[i].confidence) {
+            result[i] = entry;
+          }
+          dominated = true;
+          break;
+        }
+      }
+    }
+    if (!dominated) {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract reflection entries from a conversation message list.
+ */
+export function extractReflections(messages: unknown[]): ReflectionResult {
+  const sessionLength = messages.length;
+
+  if (sessionLength < MIN_SESSION_LENGTH) {
+    return { entries: [], sessionLength };
+  }
+
+  const entries: ReflectionEntry[] = [];
+
+  for (const msg of messages) {
+    const role = getMessageRole(msg);
+    const content = getMessageContent(msg);
+    if (!content) continue;
+
+    for (const group of PATTERN_GROUPS) {
+      if (role !== group.role) continue;
+
+      for (const pattern of group.patterns) {
+        const match = content.match(pattern);
+        if (match && match[1]) {
+          const captured = match[1].trim();
+          // Full sentence match (captured ends with punctuation) -> 0.8, else 0.6
+          const isFullSentence = /[.!?\u3002\uff01\uff1f]$/.test(captured);
+          const confidence = isFullSentence ? 0.8 : 0.6;
+          entries.push({
+            type: group.type,
+            content: captured,
+            confidence,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    entries: deduplicate(entries),
+    sessionLength,
+  };
+}

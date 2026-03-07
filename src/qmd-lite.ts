@@ -78,6 +78,13 @@ const SCHEMA_SQL = `
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     modified_at TEXT NOT NULL,
+    category TEXT,
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at TEXT,
+    abstract TEXT,
+    summary TEXT,
+    scope TEXT,
     FOREIGN KEY (hash) REFERENCES content(hash)
   );
 
@@ -245,5 +252,219 @@ export function findActiveDocument(
     (db
       .prepare(`SELECT id, hash FROM documents WHERE collection = ? AND path = ? AND active = 1`)
       .get(collection, docPath) as { id: number; hash: string } | undefined) ?? null
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Extended operations for memory features
+// ---------------------------------------------------------------------------
+
+export function updateAccessCount(db: Database, docId: number): void {
+  db.prepare(
+    `UPDATE documents SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`,
+  ).run(new Date().toISOString(), docId);
+}
+
+export function updateDocument(
+  db: Database,
+  docId: number,
+  fields: {
+    hash?: string;
+    title?: string;
+    category?: string;
+    importance?: number;
+    abstract?: string;
+    summary?: string;
+    scope?: string;
+    modifiedAt?: string;
+  },
+): void {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (fields.hash !== undefined) { sets.push("hash = ?"); params.push(fields.hash); }
+  if (fields.title !== undefined) { sets.push("title = ?"); params.push(fields.title); }
+  if (fields.category !== undefined) { sets.push("category = ?"); params.push(fields.category); }
+  if (fields.importance !== undefined) { sets.push("importance = ?"); params.push(fields.importance); }
+  if (fields.abstract !== undefined) { sets.push("abstract = ?"); params.push(fields.abstract); }
+  if (fields.summary !== undefined) { sets.push("summary = ?"); params.push(fields.summary); }
+  if (fields.scope !== undefined) { sets.push("scope = ?"); params.push(fields.scope); }
+  if (fields.modifiedAt !== undefined) { sets.push("modified_at = ?"); params.push(fields.modifiedAt); }
+
+  if (sets.length === 0) return;
+  params.push(docId);
+  db.prepare(`UPDATE documents SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+}
+
+export function deleteDocument(db: Database, docId: number): void {
+  db.prepare(`DELETE FROM documents WHERE id = ?`).run(docId);
+}
+
+export function findDocumentByPath(
+  db: Database,
+  collection: string,
+  docPath: string,
+): {
+  id: number;
+  hash: string;
+  category: string | null;
+  importance: number;
+  accessCount: number;
+  abstract: string | null;
+  summary: string | null;
+  scope: string | null;
+  createdAt: string;
+} | null {
+  return (
+    (db
+      .prepare(
+        `SELECT id, hash, category, importance, access_count as accessCount, abstract, summary, scope, created_at as createdAt
+         FROM documents WHERE collection = ? AND path = ? AND active = 1`,
+      )
+      .get(collection, docPath) as {
+      id: number;
+      hash: string;
+      category: string | null;
+      importance: number;
+      accessCount: number;
+      abstract: string | null;
+      summary: string | null;
+      scope: string | null;
+      createdAt: string;
+    } | undefined) ?? null
+  );
+}
+
+export type FTSResultExtended = FTSResult & {
+  docId: number;
+  category: string | null;
+  importance: number;
+  accessCount: number;
+  lastAccessedAt: string | null;
+  abstract: string | null;
+  summary: string | null;
+  scope: string | null;
+  createdAt: string;
+};
+
+export function searchFTSExtended(
+  db: Database,
+  query: string,
+  limit = 20,
+  collectionName?: string,
+  scope?: string,
+): FTSResultExtended[] {
+  const ftsQuery = buildFTS5Query(query);
+  if (!ftsQuery) return [];
+
+  let sql = `
+    SELECT
+      d.id as docId,
+      d.collection,
+      d.path,
+      d.title,
+      content.doc as body,
+      d.hash,
+      d.category,
+      d.importance,
+      d.access_count as accessCount,
+      d.last_accessed_at as lastAccessedAt,
+      d.abstract,
+      d.summary,
+      d.scope,
+      d.created_at as createdAt,
+      bm25(documents_fts, 10.0, 1.0) as bm25_score
+    FROM documents_fts f
+    JOIN documents d ON d.id = f.rowid
+    JOIN content ON content.hash = d.hash
+    WHERE documents_fts MATCH ? AND d.active = 1
+  `;
+  const params: unknown[] = [ftsQuery];
+
+  if (collectionName) {
+    sql += ` AND d.collection = ?`;
+    params.push(collectionName);
+  }
+
+  if (scope) {
+    sql += ` AND d.scope = ?`;
+    params.push(scope);
+  }
+
+  sql += ` ORDER BY bm25_score ASC LIMIT ?`;
+  params.push(limit);
+
+  type Row = {
+    docId: number;
+    collection: string;
+    path: string;
+    title: string;
+    body: string;
+    hash: string;
+    category: string | null;
+    importance: number;
+    accessCount: number;
+    lastAccessedAt: string | null;
+    abstract: string | null;
+    summary: string | null;
+    scope: string | null;
+    createdAt: string;
+    bm25_score: number;
+  };
+
+  const rows = db.prepare(sql).all(...params) as Row[];
+
+  return rows.map((row) => {
+    const score = Math.abs(row.bm25_score) / (1 + Math.abs(row.bm25_score));
+    return {
+      id: row.path,
+      content: row.body,
+      title: row.title,
+      collection: row.collection,
+      score,
+      docId: row.docId,
+      category: row.category,
+      importance: row.importance,
+      accessCount: row.accessCount,
+      lastAccessedAt: row.lastAccessedAt,
+      abstract: row.abstract,
+      summary: row.summary,
+      scope: row.scope,
+      createdAt: row.createdAt,
+    };
+  });
+}
+
+export function insertDocumentExtended(
+  db: Database,
+  collection: string,
+  docPath: string,
+  title: string,
+  hash: string,
+  createdAt: string,
+  modifiedAt: string,
+  extra?: {
+    category?: string;
+    importance?: number;
+    abstract?: string;
+    summary?: string;
+    scope?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO documents (collection, path, title, hash, active, created_at, modified_at, category, importance, abstract, summary, scope)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    collection,
+    docPath,
+    title,
+    hash,
+    createdAt,
+    modifiedAt,
+    extra?.category ?? null,
+    extra?.importance ?? 0.5,
+    extra?.abstract ?? null,
+    extra?.summary ?? null,
+    extra?.scope ?? null,
   );
 }

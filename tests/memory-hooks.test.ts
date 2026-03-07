@@ -19,6 +19,7 @@ function createMockStore(overrides: Partial<MemoryStore> = {}): MemoryStore {
     })) as unknown as MemoryStore["write"],
     search: vi.fn(async () => []) as unknown as MemoryStore["search"],
     get: vi.fn(async () => null) as unknown as MemoryStore["get"],
+    delete: vi.fn(async () => true) as unknown as MemoryStore["delete"],
     ensureCollection: vi.fn(),
     reindex: vi.fn(async () => {}),
     close: vi.fn(),
@@ -42,7 +43,7 @@ describe("createRecallHook", () => {
     expect(result!.prependContext).toContain("JWT for auth");
     expect(result!.prependContext).toContain("<recalled-memories>");
     expect(result!.prependContext).toContain("untrusted historical data");
-    expect(store.search).toHaveBeenCalledWith("how does auth work?", 5, 0.3);
+    expect(store.search).toHaveBeenCalledWith("how does auth work?", 10, 0.3);
   });
 
   it("escapes HTML in recalled memories", async () => {
@@ -166,7 +167,7 @@ describe("createCaptureHook", () => {
     });
 
     const writeCount = (store.write as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(writeCount).toBeLessThanOrEqual(3);
+    expect(writeCount).toBeLessThanOrEqual(5);
   });
 
   it("calls reindex once after batch writes", async () => {
@@ -215,7 +216,7 @@ describe("detectCategory", () => {
   });
 
   it("detects decisions", () => {
-    expect(detectCategory("We decided to use React")).toBe("decision");
+    expect(detectCategory("We decided to use React")).toBe("event");
   });
 
   it("detects entities", () => {

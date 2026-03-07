@@ -1,9 +1,32 @@
+export type MemoryCategory =
+  | "profile"
+  | "preference"
+  | "entity"
+  | "event"
+  | "case"
+  | "pattern";
+
+export const MEMORY_CATEGORIES: readonly MemoryCategory[] = [
+  "profile",
+  "preference",
+  "entity",
+  "event",
+  "case",
+  "pattern",
+];
+
 export type MemoryEntry = {
   id: string;
   content: string;
   category?: string;
   tags?: string[];
   created: string;
+  importance?: number;
+  accessCount?: number;
+  lastAccessedAt?: string;
+  abstract?: string;
+  summary?: string;
+  scope?: string;
 };
 
 export function slugify(text: string): string {
@@ -31,6 +54,12 @@ export function formatMemoryFile(entry: MemoryEntry): string {
     lines.push(`tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
   }
   lines.push(`created: "${entry.created}"`);
+  if (entry.importance !== undefined && entry.importance !== 0.5) {
+    lines.push(`importance: ${entry.importance}`);
+  }
+  if (entry.scope) {
+    lines.push(`scope: "${entry.scope}"`);
+  }
   lines.push("---");
   lines.push("");
   lines.push(entry.content);
@@ -49,6 +78,8 @@ export function parseMemoryFile(raw: string): MemoryEntry | null {
   const categoryMatch = frontmatter.match(/^category:\s*"(.+)"$/m);
   const createdMatch = frontmatter.match(/^created:\s*"(.+)"$/m);
   const tagsMatch = frontmatter.match(/^tags:\s*\[(.+)\]$/m);
+  const importanceMatch = frontmatter.match(/^importance:\s*(.+)$/m);
+  const scopeMatch = frontmatter.match(/^scope:\s*"(.+)"$/m);
 
   if (!idMatch || !createdMatch) return null;
 
@@ -59,12 +90,16 @@ export function parseMemoryFile(raw: string): MemoryEntry | null {
         .filter(Boolean)
     : undefined;
 
+  const importance = importanceMatch ? parseFloat(importanceMatch[1]) : undefined;
+
   return {
     id: idMatch[1]!,
     content: body,
     category: categoryMatch?.[1],
     tags,
     created: createdMatch[1]!,
+    importance: importance !== undefined && !isNaN(importance) ? importance : undefined,
+    scope: scopeMatch?.[1],
   };
 }
 
