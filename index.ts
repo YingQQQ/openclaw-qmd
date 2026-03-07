@@ -101,10 +101,9 @@ const queryParameters = Type.Object({
       description: "Structured qmd sub-queries. Only 'lex' type is supported in code mode.",
     }),
   ),
-  collections: Type.Optional(
-    Type.Array(Type.String(), {
-      minItems: 1,
-      description: "Restrict results to one or more collections.",
+  collection: Type.Optional(
+    Type.String({
+      description: "Restrict results to a single collection name.",
     }),
   ),
   limit: Type.Optional(
@@ -294,8 +293,16 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
             details: [],
           };
         }
+        // 返回分层摘要而非全文，减少 token 消耗；agent 可用 memory_get 获取完整内容
+        const summaryResults = results.map((r) => ({
+          id: r.id,
+          category: r.category,
+          score: r.score,
+          created: r.created,
+          summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
+        }));
         return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(summaryResults, null, 2) }],
           details: results,
         };
       },
@@ -467,7 +474,7 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
 
         const limit = (params.limit as number) ?? 10;
         const minScore = params.minScore as number | undefined;
-        const collection = (params.collections as string[] | undefined)?.[0];
+        const collection = params.collection as string | undefined;
 
         let results = reader.query(queryText, limit, collection);
         if (minScore !== undefined) {
@@ -488,9 +495,18 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
           };
         }
 
+        // 非 full 模式：返回 snippet（前 200 字符）而非全文，减少 token 消耗
+        const snippetResults = results.map((r) => ({
+          id: r.id,
+          title: r.title,
+          collection: r.collection,
+          score: r.score,
+          snippet: r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content,
+        }));
+
         return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-          details: results,
+          content: [{ type: "text", text: JSON.stringify(snippetResults, null, 2) }],
+          details: snippetResults,
         };
       },
     },
@@ -615,11 +631,11 @@ const plugin = {
   kind: "memory" as const,
   description: "OpenClaw plugin for querying a local qmd knowledge base with memory backend.",
   configSchema: pluginConfigSchema,
-  register(api: OpenClawPluginApi) {
+  async register(api: OpenClawPluginApi) {
     const config = resolveConfig(api.pluginConfig);
 
-    // 初始化 qmd reader
-    createQmdReader({
+    // 并行初始化，但 await 两者完成后再返回，保证工具和 hook 在 register() 返回前全部就绪
+    const qmdReaderPromise = createQmdReader({
       indexName: config.indexName,
       dbPath: config.dbPath,
       configDir: config.configDir,
@@ -632,15 +648,16 @@ const plugin = {
       throw err;
     });
 
-    // Memory 功能
-    if (config.memoryDir) {
-      createMemoryStore({
-        memoryDir: config.memoryDir,
-        scope: config.scope,
-      }).then((store) => {
-        registerMemoryFeatures(api, config, store);
-      });
-    }
+    const memoryPromise = config.memoryDir
+      ? createMemoryStore({
+          memoryDir: config.memoryDir,
+          scope: config.scope,
+        }).then((store) => {
+          registerMemoryFeatures(api, config, store);
+        })
+      : Promise.resolve();
+
+    await Promise.all([qmdReaderPromise, memoryPromise]);
   },
 };
 

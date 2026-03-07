@@ -103,7 +103,7 @@ describe("plugin tool registration", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.details.length).toBeGreaterThan(0);
-    expect(result.details[0].content).toContain("JWT");
+    expect(result.details[0].snippet).toContain("JWT");
   });
 
   it("qmd_query returns error when no query provided", async () => {

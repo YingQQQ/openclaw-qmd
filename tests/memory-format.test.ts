@@ -30,7 +30,7 @@ describe("slugify", () => {
 describe("generateMemoryId", () => {
   it("produces a timestamp + slug format", () => {
     const id = generateMemoryId("some content about auth", "Auth Decision");
-    expect(id).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_auth-decision$/);
+    expect(id).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}_[a-z0-9]{4}_auth-decision$/);
   });
 
   it("falls back to content when no title", () => {
