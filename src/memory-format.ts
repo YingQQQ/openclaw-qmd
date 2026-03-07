@@ -70,7 +70,9 @@ export function formatMemoryFile(entry: MemoryEntry): string {
 }
 
 export function parseMemoryFile(raw: string): MemoryEntry | null {
-  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  // Normalize CRLF to LF for Windows compatibility
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!fmMatch) return null;
 
   const frontmatter = fmMatch[1]!;

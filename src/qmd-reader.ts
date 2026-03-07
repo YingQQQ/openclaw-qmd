@@ -84,6 +84,10 @@ function getConfigDir(config: QmdReaderConfig): string {
   if (config.configDir) return config.configDir;
   if (process.env.QMD_CONFIG_DIR) return process.env.QMD_CONFIG_DIR;
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, "qmd");
+  // Windows: use LOCALAPPDATA; Unix: use ~/.config
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, "qmd");
+  }
   return path.join(homedir(), ".config", "qmd");
 }
 
@@ -273,11 +277,13 @@ function getContextForFile(
       relativePath = match[2] ?? "";
     }
   } else {
+    const normalizedFilepath = filepath.replace(/\\/g, "/");
     for (const coll of collections) {
-      if (filepath.startsWith(coll.path + "/") || filepath === coll.path) {
+      const normalizedCollPath = coll.path.replace(/\\/g, "/");
+      if (normalizedFilepath.startsWith(normalizedCollPath + "/") || normalizedFilepath === normalizedCollPath) {
         collectionName = coll.name;
-        relativePath = filepath.startsWith(coll.path + "/")
-          ? filepath.slice(coll.path.length + 1)
+        relativePath = normalizedFilepath.startsWith(normalizedCollPath + "/")
+          ? normalizedFilepath.slice(normalizedCollPath.length + 1)
           : "";
         break;
       }
@@ -340,7 +346,14 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
   const db = await openDatabase(dbPath);
 
   function resolveDefaultDbPath(cfg: QmdReaderConfig): string {
-    const cacheDir = process.env.XDG_CACHE_HOME ?? path.join(homedir(), ".cache");
+    let cacheDir: string;
+    if (process.env.XDG_CACHE_HOME) {
+      cacheDir = process.env.XDG_CACHE_HOME;
+    } else if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+      cacheDir = path.join(process.env.LOCALAPPDATA, "cache");
+    } else {
+      cacheDir = path.join(homedir(), ".cache");
+    }
     const indexName = cfg.indexName ?? "index";
     return path.join(cacheDir, "qmd", `${indexName}.sqlite`);
   }
@@ -415,7 +428,7 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
     }
 
     if (filepath.startsWith("~/")) {
-      filepath = homedir() + filepath.slice(1);
+      filepath = path.join(homedir(), filepath.slice(2));
     }
 
     const cols = includeBody ? SELECT_COLS_WITH_BODY : SELECT_COLS;
@@ -440,11 +453,13 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
     // Try absolute path via YAML collections
     if (!doc && !filepath.startsWith("qmd://")) {
       const collections = loadCollections(config);
+      const normalizedFp = filepath.replace(/\\/g, "/");
       for (const coll of collections) {
         let relativePath: string | null = null;
-        if (filepath.startsWith(coll.path + "/")) {
-          relativePath = filepath.slice(coll.path.length + 1);
-        } else if (!filepath.startsWith("/")) {
+        const normalizedCollPath = coll.path.replace(/\\/g, "/");
+        if (normalizedFp.startsWith(normalizedCollPath + "/")) {
+          relativePath = normalizedFp.slice(normalizedCollPath.length + 1);
+        } else if (!path.isAbsolute(filepath)) {
           relativePath = filepath;
         }
         if (relativePath) {
@@ -479,9 +494,11 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
 
     if (!row) {
       const collections = loadCollections(config);
+      const normalizedFp = filepath.replace(/\\/g, "/");
       for (const coll of collections) {
-        if (filepath.startsWith(coll.path + "/")) {
-          const relativePath = filepath.slice(coll.path.length + 1);
+        const normalizedCollPath = coll.path.replace(/\\/g, "/");
+        if (normalizedFp.startsWith(normalizedCollPath + "/")) {
+          const relativePath = normalizedFp.slice(normalizedCollPath.length + 1);
           row = db.prepare(`
             SELECT content.doc as body
             FROM documents d JOIN content ON content.hash = d.hash

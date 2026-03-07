@@ -50,7 +50,7 @@ export function generateAbstract(
   content: string,
   maxChars: number = 150,
 ): string {
-  const sentenceEnd = content.search(/[。？！\?\!\n]/);
+  const sentenceEnd = content.search(/[。？！\?\!\r\n]/);
   if (sentenceEnd !== -1) {
     const firstSentence = content.slice(0, sentenceEnd + 1).trimEnd();
     if (firstSentence.length <= maxChars) {
@@ -67,7 +67,9 @@ export function generateSummary(
   content: string,
   maxChars: number = 750,
 ): string {
-  const paragraphEnd = content.indexOf("\n\n");
+  // Handle both LF and CRLF paragraph breaks
+  const paragraphMatch = content.match(/\r?\n\r?\n/);
+  const paragraphEnd = paragraphMatch ? content.indexOf(paragraphMatch[0]) : -1;
   if (paragraphEnd !== -1 && paragraphEnd <= maxChars) {
     return content.slice(0, paragraphEnd);
   }

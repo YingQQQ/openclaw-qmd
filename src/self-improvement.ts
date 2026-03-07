@@ -153,7 +153,7 @@ export function readLearnings(learningsDir: string): LearningRecord[] {
   const filePath = path.join(learningsDir, "LEARNINGS.md");
   if (!existsSync(filePath)) return [];
 
-  const text = readFileSync(filePath, "utf-8");
+  const text = readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
   const records: LearningRecord[] = [];
 
   // Split on "---" separators
@@ -185,7 +185,7 @@ export function readErrors(learningsDir: string): ErrorRecord[] {
   const filePath = path.join(learningsDir, "ERRORS.md");
   if (!existsSync(filePath)) return [];
 
-  const text = readFileSync(filePath, "utf-8");
+  const text = readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
   const records: ErrorRecord[] = [];
 
   const blocks = text.split(/^---$/m).filter((b) => b.trim());
