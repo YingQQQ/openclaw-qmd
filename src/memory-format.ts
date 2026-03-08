@@ -47,7 +47,6 @@ export function slugify(text: string): string {
 export function generateMemoryId(content: string, title?: string): string {
   const now = new Date();
   const ts = now.toISOString().replace(/:/g, "-").replace("Z", "");
-  // 保留毫秒 + 4 位随机后缀，防止同秒碰撞
   const rand = Math.random().toString(36).slice(2, 6);
   const slug = slugify(title ?? content.slice(0, 60));
   return `${ts}_${rand}_${slug}`;
@@ -104,7 +103,6 @@ export function formatMemoryFile(entry: MemoryEntry): string {
 }
 
 export function parseMemoryFile(raw: string): MemoryEntry | null {
-  // Normalize CRLF to LF for Windows compatibility
   const normalized = raw.replace(/\r\n/g, "\n");
   const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!fmMatch) return null;

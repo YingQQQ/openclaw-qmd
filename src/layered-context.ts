@@ -67,7 +67,6 @@ export function generateSummary(
   content: string,
   maxChars: number = 750,
 ): string {
-  // Handle both LF and CRLF paragraph breaks
   const paragraphMatch = content.match(/\r?\n\r?\n/);
   const paragraphEnd = paragraphMatch ? content.indexOf(paragraphMatch[0]) : -1;
   if (paragraphEnd !== -1 && paragraphEnd <= maxChars) {

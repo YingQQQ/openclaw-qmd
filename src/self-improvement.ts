@@ -1,7 +1,3 @@
-/**
- * Self-improvement: maintain agent error records and learning files.
- */
-
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
@@ -13,13 +9,9 @@ export type ErrorRecord = {
 
 export type LearningRecord = {
   timestamp: string;
-  category: string; // "error_fix" | "pattern" | "optimization"
+  category: string;
   content: string;
 };
-
-// ---------------------------------------------------------------------------
-// Error/fix pattern detection
-// ---------------------------------------------------------------------------
 
 const ERROR_KEYWORDS =
   /\b(?:error|failed|failure|bug|exception|crash|错误|失败|异常)\b/i;
@@ -41,11 +33,6 @@ function getContent(msg: unknown): string {
   return "";
 }
 
-/**
- * Detect error -> fix patterns in a conversation.
- * Scans assistant messages for error keywords, then looks for subsequent
- * fix keywords in later assistant messages.
- */
 export function detectErrorFixPattern(messages: unknown[]): ErrorRecord[] {
   const records: ErrorRecord[] = [];
   const assistantMessages: { index: number; content: string }[] = [];
@@ -64,7 +51,6 @@ export function detectErrorFixPattern(messages: unknown[]): ErrorRecord[] {
   for (let i = 0; i < assistantMessages.length; i++) {
     if (!ERROR_KEYWORDS.test(assistantMessages[i].content)) continue;
 
-    // Look for a fix in subsequent messages
     for (let j = i + 1; j < assistantMessages.length; j++) {
       if (usedFixIndices.has(j)) continue;
       if (FIX_KEYWORDS.test(assistantMessages[j].content)) {
@@ -82,10 +68,6 @@ export function detectErrorFixPattern(messages: unknown[]): ErrorRecord[] {
   return records;
 }
 
-// ---------------------------------------------------------------------------
-// File operations
-// ---------------------------------------------------------------------------
-
 const MAX_FILE_ENTRIES = 200;
 
 function ensureDir(dir: string): void {
@@ -94,9 +76,6 @@ function ensureDir(dir: string): void {
   }
 }
 
-/**
- * Trim a "---"-separated file to keep only the most recent entries.
- */
 function trimFileEntries(filePath: string, maxEntries: number): void {
   if (!existsSync(filePath)) return;
   const text = readFileSync(filePath, "utf-8");
@@ -106,14 +85,6 @@ function trimFileEntries(filePath: string, maxEntries: number): void {
   writeFileSync(filePath, kept.join("\n---\n") + "\n---\n\n", "utf-8");
 }
 
-/**
- * Append a learning record to LEARNINGS.md.
- *
- * Format:
- * ## [timestamp] category
- * content
- * ---
- */
 export function appendLearning(
   learningsDir: string,
   record: LearningRecord,
@@ -132,15 +103,6 @@ export function appendLearning(
   trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
-/**
- * Append an error record to ERRORS.md.
- *
- * Format:
- * ## [timestamp]
- * **Error:** description
- * **Resolution:** resolution
- * ---
- */
 export function appendError(
   learningsDir: string,
   record: ErrorRecord,
@@ -162,9 +124,6 @@ export function appendError(
   trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
-/**
- * Parse LEARNINGS.md and return structured records.
- */
 export function readLearnings(learningsDir: string): LearningRecord[] {
   const filePath = path.join(learningsDir, "LEARNINGS.md");
   if (!existsSync(filePath)) return [];
@@ -172,7 +131,6 @@ export function readLearnings(learningsDir: string): LearningRecord[] {
   const text = readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
   const records: LearningRecord[] = [];
 
-  // Split on "---" separators
   const blocks = text.split(/^---$/m).filter((b) => b.trim());
 
   for (const block of blocks) {
@@ -183,7 +141,6 @@ export function readLearnings(learningsDir: string): LearningRecord[] {
 
     const timestamp = headerMatch[1];
     const category = headerMatch[2];
-    // Content is everything after the header line
     const contentStart = block.indexOf("\n", block.indexOf(headerMatch[0]));
     const content =
       contentStart >= 0 ? block.slice(contentStart + 1).trim() : "";
@@ -194,9 +151,6 @@ export function readLearnings(learningsDir: string): LearningRecord[] {
   return records;
 }
 
-/**
- * Parse ERRORS.md and return structured records.
- */
 export function readErrors(learningsDir: string): ErrorRecord[] {
   const filePath = path.join(learningsDir, "ERRORS.md");
   if (!existsSync(filePath)) return [];
@@ -228,14 +182,6 @@ export function readErrors(learningsDir: string): ErrorRecord[] {
   return records;
 }
 
-/**
- * Format learning records as context injection text.
- *
- * Output:
- * <agent-learnings>
- * - [category] content
- * </agent-learnings>
- */
 export function formatLearningsContext(
   records: LearningRecord[],
   maxRecords = 10,

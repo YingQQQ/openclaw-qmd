@@ -1,7 +1,3 @@
-/**
- * Noise filter: filter out low-value text before capture.
- */
-
 const DENIAL_PATTERNS: RegExp[] = [
   /i('m| am) (sorry|unable|not able|afraid)/i,
   /i can('t|not| not)/i,
@@ -36,17 +32,10 @@ export function isBoilerplate(text: string): boolean {
   return BOILERPLATE_PATTERNS.some((p) => p.test(trimmed));
 }
 
-/**
- * Returns true if the text matches any noise pattern
- * (denial, meta question, or boilerplate).
- */
 export function isNoise(text: string): boolean {
   return isDenial(text) || isMetaQuestion(text) || isBoilerplate(text);
 }
 
-/**
- * Filters out noise texts, returning only meaningful content.
- */
 export function filterNoise(texts: string[]): string[] {
   return texts.filter((t) => !isNoise(t));
 }

@@ -28,10 +28,6 @@ export type CaptureHookConfig = {
   learningsDir?: string;
 };
 
-// ---------------------------------------------------------------------------
-// Prompt injection detection & content escaping
-// ---------------------------------------------------------------------------
-
 const PROMPT_INJECTION_PATTERNS = [
   /ignore\s+(all\s+|any\s+)?(previous|above|prior)?\s*instructions/i,
   /do not follow (the )?(system|developer)/i,
@@ -68,10 +64,6 @@ function shouldIncludeArchivedRecall(query: string): boolean {
   return /\b(history|historical|old|legacy|previously|earlier|before)\b/i.test(query)
     || /之前|以前|历史|旧的|早先|曾经/.test(query);
 }
-
-// ---------------------------------------------------------------------------
-// Auto-recall hook (before_prompt_build)
-// ---------------------------------------------------------------------------
 
 function toLayeredMemories(results: RecalledMemory[]): LayeredMemory[] {
   return results.map((r) => ({
@@ -112,7 +104,6 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
       await store.compact();
     }
 
-    // 自适应检索：跳过无意义查询（除非强制触发）
     if (!shouldForceRetrieve(query) && shouldSkipRetrieval(query)) return;
 
     const preconscious = await store.buildPreconscious(config.preconsciousLimit ?? 3);
@@ -127,21 +118,17 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     );
     if (!rawResults.length && preconscious.length === 0) return;
 
-    // 过滤已召回的记忆
     const unseenResults = session.filterRecalled(rawResults);
     if (!unseenResults.length && preconscious.length === 0) return;
 
-    // 后处理管道
     const processed = postProcess(toScoredResults(unseenResults), {
       minScore: config.autoRecallMinScore,
       categoryWeights: inferCategoryWeights(query),
     });
 
-    // 取 top N
     const topResults = processed.slice(0, config.autoRecallLimit);
     if (!topResults.length && preconscious.length === 0) return;
 
-    // 重建 RecalledMemory（保留 abstract/summary）
     const recalledMap = new Map(unseenResults.map((r) => [r.id, r]));
     const finalResults: RecalledMemory[] = topResults
       .map((p) => {
@@ -151,13 +138,11 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
       })
       .filter((r): r is RecalledMemory => r !== null);
 
-    // 标记已召回
     for (const r of finalResults) {
       session.markRecalled(r.id);
     }
     await store.recordAccess(finalResults.map((item) => item.id));
 
-    // L0/L1/L2 分层格式化
     const context = finalResults.length > 0 ? formatLayeredContext(toLayeredMemories(finalResults)) : "";
     const preconsciousBlock = preconscious.length > 0
       ? [
@@ -174,7 +159,6 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     if (preconsciousBlock) parts.push(preconsciousBlock);
     if (context) parts.push(context);
 
-    // 注入 agent learnings
     if (config.learningsDir) {
       const learnings = readLearnings(config.learningsDir);
       if (learnings.length > 0) {
@@ -185,10 +169,6 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     return { prependContext: parts.join("\n\n") };
   };
 }
-
-// ---------------------------------------------------------------------------
-// Auto-capture hook (agent_end)
-// ---------------------------------------------------------------------------
 
 const MEMORY_TRIGGERS = [
   /remember|zapamatuj/i,
@@ -244,7 +224,6 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
 
     const texts = extractUserTexts(event.messages);
 
-    // 噪声过滤
     const cleaned = filterNoise(texts);
 
     const toCapture = cleaned.filter((t) => shouldCapture(t, captureMode, captureMaxLength));
@@ -263,11 +242,9 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     let stored = 0;
     let reflectionStored = 0;
     for (const text of toCapture.slice(0, 5)) {
-      // 会话内去重
       const hash = quickHash(text);
       if (session.wasCaptured(hash)) continue;
 
-      // 数据库去重
       const existing = await store.search(text, 1, 0.9);
       if (existing.length > 0) {
         session.markCaptured(hash);
@@ -284,7 +261,6 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
       stored++;
     }
 
-    // 会话反思
     if (event.messages.length >= 10) {
       const reflections = extractReflections(event.messages);
       for (const entry of reflections.entries.slice(0, 3)) {
@@ -298,7 +274,6 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
       }
     }
 
-    // 自我改进：错误记录
     if (config?.learningsDir) {
       const errors = detectErrorFixPattern(event.messages);
       for (const err of errors) {

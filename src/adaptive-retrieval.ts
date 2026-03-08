@@ -1,7 +1,3 @@
-/**
- * Adaptive retrieval: decide whether to skip or force memory retrieval.
- */
-
 const SKIP_PATTERNS: RegExp[] = [
   /^(hi|hello|hey|你好|嗨|哈喽|早|晚安|good\s*(morning|evening|night))[\s!！.。]*$/i,
   /^(ok|okay|yes|no|sure|got it|好的?|是的?|嗯|行|可以|没问题|收到|对|不是?|understood)[\s!！.。]*$/i,
@@ -23,20 +19,14 @@ function hasCJK(text: string): boolean {
   return CJK_RANGE.test(text);
 }
 
-/**
- * Returns true if the query should skip memory retrieval.
- * Short or trivial queries are skipped.
- */
 export function shouldSkipRetrieval(query: string, minLength?: number): boolean {
   const trimmed = query.trim();
   if (trimmed.length === 0) return true;
 
-  // Check skip patterns first
   for (const pattern of SKIP_PATTERNS) {
     if (pattern.test(trimmed)) return true;
   }
 
-  // Minimum length check
   if (minLength !== undefined) {
     return trimmed.length < minLength;
   }
@@ -45,10 +35,6 @@ export function shouldSkipRetrieval(query: string, minLength?: number): boolean 
   return trimmed.length < minLen;
 }
 
-/**
- * Returns true if the query should force memory retrieval
- * (e.g., user explicitly references past memories).
- */
 export function shouldForceRetrieve(query: string): boolean {
   const trimmed = query.trim();
   for (const pattern of FORCE_RETRIEVE_PATTERNS) {

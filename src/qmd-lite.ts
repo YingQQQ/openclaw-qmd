@@ -1,22 +1,6 @@
-/**
- * qmd-lite.ts — 从 @tobilu/qmd 的 store.ts / db.ts 中抽取的最小子集。
- *
- * 只包含 memory 场景需要的功能：
- * - 打开 SQLite 数据库
- * - FTS5 全文检索（BM25）
- * - 写入文档
- * - 内容哈希
- *
- * 不依赖 node-llama-cpp、collections.yaml、sqlite-vec。
- */
-
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-
-// ---------------------------------------------------------------------------
-// Database layer (from qmd db.ts)
-// ---------------------------------------------------------------------------
 
 export interface Statement {
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
@@ -28,7 +12,6 @@ export interface Database {
   exec(sql: string): void;
   prepare(sql: string): Statement;
   close(): void;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   transaction(fn: (...args: any[]) => any): (...args: any[]) => any;
 }
 
@@ -50,19 +33,12 @@ export async function openDatabase(dbPath: string): Promise<Database> {
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new _DatabaseCtor(dbPath);
 
-  // WAL 模式：写入不阻塞读取，且自动 checkpoint 防止 WAL 文件无限增长
   db.exec("PRAGMA journal_mode = WAL");
-  // 限制 page cache 大小（负数表示 KB），-4000 ≈ 4MB 上限
   db.exec("PRAGMA cache_size = -4000");
-  // 自动 checkpoint：WAL 达到 1000 页时自动合并回主数据库
   db.exec("PRAGMA wal_autocheckpoint = 1000");
 
   return db;
 }
-
-// ---------------------------------------------------------------------------
-// Schema initialization
-// ---------------------------------------------------------------------------
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS content (
@@ -154,10 +130,6 @@ function ensureColumn(
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
-// ---------------------------------------------------------------------------
-// FTS5 search (from qmd store.ts searchFTS / buildFTS5Query)
-// ---------------------------------------------------------------------------
-
 function sanitizeFTS5Term(term: string): string {
   return term.replace(/[^\p{L}\p{N}']/gu, "").toLowerCase();
 }
@@ -237,10 +209,6 @@ export function searchFTS(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Write operations (from qmd store.ts)
-// ---------------------------------------------------------------------------
-
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -283,10 +251,6 @@ export function findActiveDocument(
       .get(collection, docPath) as { id: number; hash: string } | undefined) ?? null
   );
 }
-
-// ---------------------------------------------------------------------------
-// Extended operations for memory features
-// ---------------------------------------------------------------------------
 
 export function updateAccessCount(db: Database, docId: number): void {
   db.prepare(
