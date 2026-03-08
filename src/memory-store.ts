@@ -656,12 +656,23 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         const nextCategory = category ?? current.category;
         const nextTitle = title ?? current.title;
         const nextTags = tags?.length ? [...new Set([...(current.tags ?? []), ...tags])] : current.tags;
+        const nextAbstract = generateAbstract(current.content);
+        const nextSummary = generateSummary(current.content);
+        const nextAliases = buildAliases(current.content, nextCategory, nextTags, undefined, nextTitle, nextAbstract, nextSummary);
+        const nextFullContent = buildFullContent(current.content, nextCategory, nextTags, nextAliases);
+        const nextHash = hashContent(nextFullContent);
+        const now = new Date().toISOString();
+        insertContent(db, nextHash, nextFullContent, now);
         updateDocument(db, doc.id, {
+          hash: nextHash,
           confidence: nextConfidence,
           importance: nextImportance,
           category: nextCategory,
           title: nextTitle,
-          modifiedAt: new Date().toISOString(),
+          aliases: nextAliases.join("|"),
+          abstract: nextAbstract,
+          summary: nextSummary,
+          modifiedAt: now,
         });
         const updated: MemoryEntry = {
           ...current,
@@ -670,6 +681,9 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           category: nextCategory,
           title: nextTitle,
           tags: nextTags,
+          abstract: nextAbstract,
+          summary: nextSummary,
+          aliases: nextAliases,
         };
         writeEntryFile(updated);
         return updated;
