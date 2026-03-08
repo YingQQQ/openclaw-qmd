@@ -76,6 +76,10 @@ function ensureDir(dir: string): void {
   }
 }
 
+function escapeSeparator(text: string): string {
+  return text.replace(/^---$/gm, "\\---");
+}
+
 function trimFileEntries(filePath: string, maxEntries: number): void {
   if (!existsSync(filePath)) return;
   const text = readFileSync(filePath, "utf-8");
@@ -92,7 +96,7 @@ export function recordInsight(
   ensureDir(learningsDir);
   const filePath = path.join(learningsDir, "LEARNINGS.md");
 
-  const entry = `## [${record.timestamp}] ${record.category}\n${record.content}\n---\n\n`;
+  const entry = `## [${record.timestamp}] ${record.category}\n${escapeSeparator(record.content)}\n---\n\n`;
 
   if (existsSync(filePath)) {
     const existing = readFileSync(filePath, "utf-8");
@@ -111,9 +115,9 @@ export function recordMistake(
   const filePath = path.join(learningsDir, "ERRORS.md");
 
   const resolutionLine = record.resolution
-    ? `**Resolution:** ${record.resolution}`
+    ? `**Resolution:** ${escapeSeparator(record.resolution)}`
     : "**Resolution:** (none)";
-  const entry = `## [${record.timestamp}]\n**Error:** ${record.description}\n${resolutionLine}\n---\n\n`;
+  const entry = `## [${record.timestamp}]\n**Error:** ${escapeSeparator(record.description)}\n${resolutionLine}\n---\n\n`;
 
   if (existsSync(filePath)) {
     const existing = readFileSync(filePath, "utf-8");

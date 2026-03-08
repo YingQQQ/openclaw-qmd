@@ -99,6 +99,8 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     const query = event.prompt?.trim();
     if (!query) return;
 
+    session.trimIfNeeded();
+
     const recovered = await store.recoverPendingSession();
     if (recovered > 0) {
       await store.compact();
@@ -220,6 +222,8 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
 
   return async (event: { messages: unknown[]; success: boolean }): Promise<void> => {
     if (!event.success) return;
+
+    session.trimIfNeeded();
 
     const texts = extractUserTexts(event.messages);
 

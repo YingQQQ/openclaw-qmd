@@ -101,10 +101,10 @@ export function rankSemanticMatches(
 
   const ranked = docs
     .map((doc) => {
-      const titleTokens = expandTokens(tokenize(doc.title ?? ""));
-      const abstractTokens = expandTokens(tokenize(doc.abstract ?? ""));
-      const summaryTokens = expandTokens(tokenize(doc.summary ?? ""));
-      const contentTokens = expandTokens(tokenize(doc.content));
+      const titleTokens = new Set(tokenize(doc.title ?? ""));
+      const abstractTokens = new Set(tokenize(doc.abstract ?? ""));
+      const summaryTokens = new Set(tokenize(doc.summary ?? ""));
+      const contentTokens = new Set(tokenize(doc.content));
 
       const titleScore = overlapScore(queryTokens, titleTokens);
       const abstractScore = overlapScore(queryTokens, abstractTokens);
@@ -138,11 +138,11 @@ export function fuseRankedResults(
   const rrf = (rank: number) => 1 / (rank + 60);
 
   lexical.forEach((item, index) => {
-    fused.set(item.id, (fused.get(item.id) ?? 0) + lexicalWeight * (item.score + rrf(index + 1)));
+    fused.set(item.id, (fused.get(item.id) ?? 0) + lexicalWeight * rrf(index + 1));
   });
 
   semantic.forEach((item, index) => {
-    fused.set(item.id, (fused.get(item.id) ?? 0) + semanticWeight * (item.score + rrf(index + 1)));
+    fused.set(item.id, (fused.get(item.id) ?? 0) + semanticWeight * rrf(index + 1));
   });
 
   return [...fused.entries()]

@@ -23,7 +23,7 @@ const USER_MODEL_PATTERNS = [
 
 const LESSON_PATTERNS = [
   /(?:the (?:issue|problem|bug|error) was|(?:问题|错误|bug)(?:是|在于))\s+(.{10,200})/i,
-  /(?:fixed by|solved by|(?:通过|靠).*(?:解决|修复))\s+(.{10,200})/i,
+  /(?:fixed by|solved by|(?:通过|靠).*?(?:解决|修复))\s+(.{10,200})/i,
   /(?:turns out|it was because|原来是?|因为)\s+(.{10,200})/i,
 ];
 

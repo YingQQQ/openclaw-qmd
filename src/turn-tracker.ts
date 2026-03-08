@@ -7,6 +7,7 @@ export type TurnTracker = {
   capturedCount(): number;
   filterRecalled<T extends { id: string }>(results: T[]): T[];
   clear(): void;
+  trimIfNeeded(maxSize?: number): void;
 };
 
 export function djb2Hash(text: string): string {
@@ -53,6 +54,15 @@ export function createTurnTracker(): TurnTracker {
     clear(): void {
       recalledIds.clear();
       capturedHashes.clear();
+    },
+
+    trimIfNeeded(maxSize = 500): void {
+      if (recalledIds.size > maxSize) {
+        recalledIds.clear();
+      }
+      if (capturedHashes.size > maxSize) {
+        capturedHashes.clear();
+      }
     },
   };
 }

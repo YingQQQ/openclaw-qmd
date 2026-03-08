@@ -653,15 +653,23 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
       if (current && doc) {
         const nextConfidence = Math.max(current.confidence ?? 0.55, options.confidence ?? 0.55);
         const nextImportance = Math.max(current.importance ?? 0.45, options.importance ?? 0.45);
+        const nextCategory = category ?? current.category;
+        const nextTitle = title ?? current.title;
+        const nextTags = tags?.length ? [...new Set([...(current.tags ?? []), ...tags])] : current.tags;
         updateDocument(db, doc.id, {
           confidence: nextConfidence,
           importance: nextImportance,
+          category: nextCategory,
+          title: nextTitle,
           modifiedAt: new Date().toISOString(),
         });
         const updated: MemoryEntry = {
           ...current,
           confidence: nextConfidence,
           importance: nextImportance,
+          category: nextCategory,
+          title: nextTitle,
+          tags: nextTags,
         };
         writeEntryFile(updated);
         return updated;
@@ -874,7 +882,9 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function compact(): Promise<CompactReport> {
-    const observations = scanDocumentsExtended(db, 500, collection, scope, "observation");
+    const currentTime = Date.now();
+    const observations = scanDocumentsExtended(db, 500, collection, scope, "observation")
+      .filter((item) => !item.expiresAt || new Date(item.expiresAt).getTime() > currentTime);
     const groups = new Map<string, DocumentScanRow[]>();
     for (const item of observations) {
       const key = normalizeStoredContent(item.content);
@@ -905,17 +915,18 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         maxImportance >= policy.promoteImportance;
 
       if (shouldPromote) {
-        const cleanContent = parseStoredDocumentContent(latest.content).content;
+        const parsedLatest = parseStoredDocumentContent(latest.content);
         const promotedEntry = await write(
-          cleanContent,
+          parsedLatest.content,
           latest.category ?? undefined,
-          undefined,
+          parsedLatest.tags,
           latest.title,
           {
             confidence: maxConfidence,
             importance: maxImportance,
             sourceType: latest.sourceType,
             aliases: latest.aliases ? latest.aliases.split("|").filter(Boolean) : undefined,
+            expiresAt: latest.expiresAt ?? undefined,
           },
         );
         promoted += 1;

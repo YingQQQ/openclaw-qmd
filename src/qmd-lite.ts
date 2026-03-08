@@ -131,13 +131,13 @@ function ensureColumn(
 }
 
 function sanitizeFTS5Term(term: string): string {
-  return term.replace(/[^\p{L}\p{N}']/gu, "").toLowerCase();
+  return term.replace(/[^\p{L}\p{N}']/gu, " ").trim().toLowerCase();
 }
 
 function buildFTS5Query(query: string): string | null {
   const terms = query
     .split(/\s+/)
-    .map((t) => sanitizeFTS5Term(t))
+    .flatMap((t) => sanitizeFTS5Term(t).split(/\s+/))
     .filter((t) => t.length > 0);
   if (terms.length === 0) return null;
   if (terms.length === 1) return `"${terms[0]}"*`;
