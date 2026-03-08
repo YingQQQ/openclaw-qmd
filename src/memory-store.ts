@@ -204,8 +204,8 @@ function installProcessExitHook() {
     for (const close of [...processClosers]) {
       try {
         close();
-      } catch {
-        // ignore shutdown cleanup errors
+      } catch (err) {
+        console.error("memory-store: exit handler error:", err);
       }
     }
   });
@@ -318,7 +318,6 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   function sanitizeId(id: string): string {
-    // Strip path separators and traversal sequences to prevent directory traversal
     const base = path.basename(id).replace(/\.\./g, "");
     if (!base) throw new Error(`Invalid memory id: ${JSON.stringify(id)}`);
     return base;
@@ -407,11 +406,14 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function recordAccess(ids: string[]): Promise<void> {
-    for (const id of ids) {
-      const doc = findDocumentByPath(db, collection, id);
-      if (!doc) continue;
-      updateAccessCount(db, doc.id);
-    }
+    const txn = db.transaction(() => {
+      for (const id of ids) {
+        const doc = findDocumentByPath(db, collection, id);
+        if (!doc) continue;
+        updateAccessCount(db, doc.id);
+      }
+    });
+    txn();
   }
 
   function searchStage(
@@ -472,6 +474,9 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     title?: string,
     options: MemoryWriteOptions = {},
   ): Promise<MemoryEntry> {
+    if (!content || !content.trim()) {
+      throw new Error("memory content must not be empty");
+    }
     const stage = options.stage ?? "memory";
     const importance = clamp01(options.importance, stage === "observation" ? 0.45 : 0.7);
     const confidence = clamp01(options.confidence, stage === "observation" ? 0.55 : 1);
@@ -516,22 +521,27 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           const fullContent = buildFullContent(nextContent, category ?? existingDoc.category ?? undefined, tags, mergedAliases);
           const newHash = hashContent(fullContent);
 
-          insertContent(db, newHash, fullContent, now);
-          updateDocument(db, existingDoc.id, {
-            hash: newHash,
-            title: title ?? nextContent.slice(0, 80),
-            category: category ?? existingDoc.category ?? undefined,
-            importance: Math.max(existingDoc.importance, importance),
-            confidence: Math.max(existingDoc.confidence, confidence),
-            abstract,
-            summary,
-            scope,
-            sourceType,
-            stage: "memory",
-            expiresAt: options.expiresAt ?? existingDoc.expiresAt,
-            aliases: mergedAliases.join("|"),
-            modifiedAt: now,
-          });
+          try {
+            insertContent(db, newHash, fullContent, now);
+            updateDocument(db, existingDoc.id, {
+              hash: newHash,
+              title: title ?? nextContent.slice(0, 80),
+              category: category ?? existingDoc.category ?? undefined,
+              importance: Math.max(existingDoc.importance, importance),
+              confidence: Math.max(existingDoc.confidence, confidence),
+              abstract,
+              summary,
+              scope,
+              sourceType,
+              stage: "memory",
+              expiresAt: options.expiresAt ?? existingDoc.expiresAt,
+              aliases: mergedAliases.join("|"),
+              modifiedAt: now,
+            });
+          } catch (err) {
+            console.error(`memory-store: failed to update document ${dedup.matchId}:`, err);
+            throw err;
+          }
 
           const updated: MemoryEntry = {
             id: dedup.matchId,
@@ -647,47 +657,47 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function get(id: string): Promise<MemoryEntry | null> {
-    const filePath = memoryFilePath(id);
     const doc = findDocumentByPath(db, collection, id);
-    const fileEntry = existsSync(filePath)
-      ? (() => {
-        try {
-          return parseMemoryFile(readFileSync(filePath, "utf-8"));
-        } catch {
-          return null;
-        }
-      })()
-      : null;
 
-    if (!doc) {
-      return fileEntry;
+    if (doc) {
+      const stored = getDocContent(doc.hash);
+      const parsedStored = stored ? parseStoredDocumentContent(stored) : null;
+
+      return {
+        id,
+        content: parsedStored?.content ?? "",
+        title: doc.title,
+        category: doc.category ?? undefined,
+        tags: parsedStored?.tags,
+        created: doc.createdAt,
+        importance: doc.importance,
+        confidence: doc.confidence,
+        accessCount: doc.accessCount,
+        abstract: doc.abstract ?? undefined,
+        summary: doc.summary ?? undefined,
+        scope: doc.scope ?? undefined,
+        sourceType: doc.sourceType ?? undefined,
+        stage: (doc.stage as "memory" | "observation") ?? undefined,
+        expiresAt: doc.expiresAt ?? undefined,
+        archived: Boolean(doc.archived),
+        lastAccessedAt: doc.lastAccessedAt ?? undefined,
+        aliases: doc.aliases
+          ? doc.aliases.split("|").map((item) => item.trim()).filter(Boolean)
+          : parsedStored?.aliases,
+      };
     }
 
-    const stored = getDocContent(doc.hash);
-    const parsedStored = stored ? parseStoredDocumentContent(stored) : null;
+    const filePath = memoryFilePath(id);
+    if (existsSync(filePath)) {
+      try {
+        return parseMemoryFile(readFileSync(filePath, "utf-8"));
+      } catch (err) {
+        console.error(`memory-store: failed to parse memory file ${filePath}:`, err);
+        return null;
+      }
+    }
 
-    return {
-      id,
-      content: parsedStored?.content ?? fileEntry?.content ?? "",
-      title: doc.title ?? fileEntry?.title,
-      category: doc.category ?? fileEntry?.category,
-      tags: fileEntry?.tags ?? parsedStored?.tags,
-      created: doc.createdAt,
-      importance: doc.importance,
-      confidence: doc.confidence,
-      accessCount: doc.accessCount,
-      abstract: doc.abstract ?? fileEntry?.abstract,
-      summary: doc.summary ?? fileEntry?.summary,
-      scope: doc.scope ?? fileEntry?.scope,
-      sourceType: doc.sourceType ?? fileEntry?.sourceType,
-      stage: (doc.stage as "memory" | "observation") ?? fileEntry?.stage,
-      expiresAt: doc.expiresAt ?? fileEntry?.expiresAt,
-      archived: Boolean(doc.archived),
-      lastAccessedAt: doc.lastAccessedAt ?? fileEntry?.lastAccessedAt,
-      aliases: (doc.aliases ? doc.aliases.split("|").map((item) => item.trim()).filter(Boolean) : undefined)
-        ?? fileEntry?.aliases
-        ?? parsedStored?.aliases,
-    };
+    return null;
   }
 
   async function deleteMemory(id: string): Promise<boolean> {
@@ -704,7 +714,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function reindex(): Promise<void> {
-    // SQLite FTS is trigger-backed; nothing to do.
+
   }
 
   async function getStats(): Promise<MemoryStats> {
@@ -894,7 +904,6 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           stage: "observation",
           category: latest.category ?? undefined,
         });
-        // Archive all observations in a single transaction for atomicity
         const archivedInTxn: typeof items = [];
         const archiveObservations = db.transaction(() => {
           for (const item of items) {
@@ -909,7 +918,6 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           }
         });
         archiveObservations();
-        // Update counters and sync files outside transaction
         for (const item of archivedInTxn) {
           archived += 1;
           archivedIds.push(item.id);
@@ -978,7 +986,6 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         });
       }
 
-      // Archive stale/expired memories in a single transaction for atomicity
       const archivedMemsInTxn: typeof items = [];
       const archiveMemories = db.transaction(() => {
         for (const item of items) {
@@ -992,7 +999,6 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         }
       });
       archiveMemories();
-      // Update counters and sync files outside transaction
       for (const item of archivedMemsInTxn) {
         archived += 1;
         archivedIds.push(item.id);
@@ -1091,7 +1097,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     try {
       db?.close();
     } catch {
-      // ignore close errors
+
     }
   }
 

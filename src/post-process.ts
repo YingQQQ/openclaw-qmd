@@ -1,7 +1,3 @@
-/**
- * BM25 post-processing pipeline: multi-dimensional re-ranking of search results.
- */
-
 export type ScoredResult = {
   id: string;
   content: string;
@@ -48,9 +44,6 @@ function ageDays(isoDate: string | undefined): number {
   return Math.max(0, ms / (1000 * 60 * 60 * 24));
 }
 
-/**
- * Boost newer memories. boost = 1 + (maxBoost - 1) * 0.5^(ageDays / halfLife)
- */
 export function applyRecencyBoost(
   results: ScoredResult[],
   maxBoost = 1.2,
@@ -64,9 +57,6 @@ export function applyRecencyBoost(
   });
 }
 
-/**
- * Multiply score by category weight.
- */
 export function applyCategoryWeight(
   results: ScoredResult[],
   weights: Record<string, number> = DEFAULT_CATEGORY_WEIGHTS,
@@ -77,9 +67,6 @@ export function applyCategoryWeight(
   });
 }
 
-/**
- * Penalize overly long content. score *= threshold / length (min 0.5).
- */
 export function applyLengthNormalization(
   results: ScoredResult[],
   threshold = 2000,
@@ -91,9 +78,6 @@ export function applyLengthNormalization(
   });
 }
 
-/**
- * Time decay: score *= 0.5^(ageDays / halfLife).
- */
 export function applyTimeDecay(
   results: ScoredResult[],
   halfLifeDays = 60,
@@ -105,9 +89,6 @@ export function applyTimeDecay(
   });
 }
 
-/**
- * Remove results below a hard minimum score.
- */
 export function hardMinScoreFilter(
   results: ScoredResult[],
   minScore: number,
@@ -169,8 +150,6 @@ export function applyAccessReinforcement(
   });
 }
 
-// --- MMR diversity ---
-
 function tokenize(text: string): Set<string> {
   return new Set(
     text
@@ -190,10 +169,6 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-/**
- * Maximal Marginal Relevance: greedily select results that balance
- * relevance and diversity using Jaccard similarity on bag-of-words.
- */
 export function applyMMRDiversity(
   results: ScoredResult[],
   lambda = 0.7,
@@ -204,7 +179,6 @@ export function applyMMRDiversity(
   const selected: number[] = [];
   const remaining = new Set(results.map((_, i) => i));
 
-  // Pick the highest-scored one first
   let bestIdx = 0;
   let bestScore = -Infinity;
   for (const i of remaining) {
@@ -216,6 +190,9 @@ export function applyMMRDiversity(
   selected.push(bestIdx);
   remaining.delete(bestIdx);
 
+  const simCache = new Map<string, number>();
+  const simKey = (a: number, b: number) => a < b ? `${a}:${b}` : `${b}:${a}`;
+
   while (remaining.size > 0) {
     let mmrBestIdx = -1;
     let mmrBestScore = -Infinity;
@@ -224,7 +201,12 @@ export function applyMMRDiversity(
       const relevance = results[i].score;
       let maxSim = 0;
       for (const j of selected) {
-        const sim = jaccardSimilarity(tokenSets[i], tokenSets[j]);
+        const key = simKey(i, j);
+        let sim = simCache.get(key);
+        if (sim === undefined) {
+          sim = jaccardSimilarity(tokenSets[i], tokenSets[j]);
+          simCache.set(key, sim);
+        }
         if (sim > maxSim) maxSim = sim;
       }
       const mmrScore = lambda * relevance - (1 - lambda) * maxSim;
@@ -241,9 +223,6 @@ export function applyMMRDiversity(
   return selected.map((i) => ({ ...results[i] }));
 }
 
-/**
- * Full post-processing pipeline.
- */
 export function postProcess(
   results: ScoredResult[],
   opts: PostProcessOptions = {},
@@ -277,7 +256,6 @@ export function postProcess(
     processed = hardMinScoreFilter(processed, minScore);
   }
 
-  // Sort by score descending before MMR
   processed.sort((a, b) => b.score - a.score);
 
   if (mmrEnabled) {

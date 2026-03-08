@@ -1,13 +1,3 @@
-/**
- * qmd-reader.ts — 直接从 qmd 的 SQLite 数据库和 YAML 配置读取数据。
- *
- * 替代 qmd CLI 调用，实现 4 个只读工具：
- * - qmd_status
- * - qmd_query (FTS/BM25 模式)
- * - qmd_get
- * - qmd_multi_get
- */
-
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -21,10 +11,6 @@ import {
   type FTSResult,
 } from "./qmd-lite.js";
 import { fuseRankedResults, rankSemanticMatches } from "./hybrid-retrieval.js";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export type QmdReaderConfig = {
   indexName?: string;
@@ -88,22 +74,16 @@ function installReaderExitHook() {
       try {
         close();
       } catch {
-        // ignore shutdown cleanup errors
       }
     }
   });
   readerExitHookInstalled = true;
 }
 
-// ---------------------------------------------------------------------------
-// YAML config reader (from qmd collections.js)
-// ---------------------------------------------------------------------------
-
 function getConfigDir(config: QmdReaderConfig): string {
   if (config.configDir) return config.configDir;
   if (process.env.QMD_CONFIG_DIR) return process.env.QMD_CONFIG_DIR;
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, "qmd");
-  // Windows: use LOCALAPPDATA; Unix: use ~/.config
   if (process.platform === "win32" && process.env.LOCALAPPDATA) {
     return path.join(process.env.LOCALAPPDATA, "qmd");
   }
@@ -130,7 +110,8 @@ function loadCollections(config: QmdReaderConfig): QmdCollection[] {
       pattern: coll.pattern ?? "**/*.md",
       context: coll.context,
     }));
-  } catch {
+  } catch (err) {
+    console.error("qmd-reader: failed to parse YAML config:", err);
     return [];
   }
 }
@@ -147,10 +128,6 @@ function loadGlobalContext(config: QmdReaderConfig): string | undefined {
     return undefined;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helper functions (extracted from qmd store.js)
-// ---------------------------------------------------------------------------
 
 function getDocid(hash: string): string {
   return hash.slice(0, 6);
@@ -199,10 +176,6 @@ export function addLineNumbers(text: string, startLine = 1): string {
 
 const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024;
 
-// ---------------------------------------------------------------------------
-// Database query functions
-// ---------------------------------------------------------------------------
-
 type DocRow = {
   virtual_path: string;
   display_path: string;
@@ -242,7 +215,7 @@ function findDocumentByDocid(db: Database, docid: string): { filepath: string; h
 }
 
 function findSimilarFiles(db: Database, query: string, maxDistance = 3, limit = 5): string[] {
-  const allFiles = db.prepare(`SELECT d.path FROM documents d WHERE d.active = 1`).all() as { path: string }[];
+  const allFiles = db.prepare(`SELECT d.path FROM documents d WHERE d.active = 1 LIMIT 10000`).all() as { path: string }[];
   const queryLower = query.toLowerCase();
   return allFiles
     .map((f) => ({ path: f.path, dist: levenshtein(f.path.toLowerCase(), queryLower) }))
@@ -346,10 +319,6 @@ function rowToDocument(row: DocRow, config: QmdReaderConfig): QmdDocument {
     ...(row.body !== undefined && { body: row.body }),
   };
 }
-
-// ---------------------------------------------------------------------------
-// QmdReader — public API
-// ---------------------------------------------------------------------------
 
 export type QmdReader = {
   getStatus(): QmdStatus;
@@ -472,13 +441,11 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
   function findDoc(filename: string, includeBody = false): FindDocumentResult {
     let filepath = filename;
 
-    // Strip trailing :linenum
     const colonMatch = filepath.match(/:(\d+)$/);
     if (colonMatch) {
       filepath = filepath.slice(0, -colonMatch[0].length);
     }
 
-    // Docid lookup
     if (isDocid(filepath)) {
       const docidMatch = findDocumentByDocid(db, filepath);
       if (docidMatch) {
@@ -494,14 +461,12 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
 
     const cols = includeBody ? SELECT_COLS_WITH_BODY : SELECT_COLS;
 
-    // Try virtual path exact match
     let doc = db.prepare(`
       SELECT ${cols}
       FROM documents d JOIN content ON content.hash = d.hash
       WHERE 'qmd://' || d.collection || '/' || d.path = ? AND d.active = 1
     `).get(filepath) as DocRow | undefined;
 
-    // Try fuzzy virtual path match
     if (!doc) {
       doc = db.prepare(`
         SELECT ${cols}
@@ -511,7 +476,6 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
       `).get(`%${filepath}`) as DocRow | undefined;
     }
 
-    // Try absolute path via YAML collections
     if (!doc && !filepath.startsWith("qmd://")) {
       const collections = loadCollections(config);
       const normalizedFp = filepath.replace(/\\/g, "/");
@@ -660,7 +624,6 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
     try {
       db?.close();
     } catch {
-      // ignore
     }
   }
   installReaderExitHook();

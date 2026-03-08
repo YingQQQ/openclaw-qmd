@@ -518,18 +518,17 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       async execute(_id, params) {
         try {
           const memoryId = params.id as string;
-          const exists = await store.get(memoryId);
-          if (!exists) {
+          await store.recordAccess([memoryId]);
+          const entry = await store.get(memoryId);
+          if (!entry) {
             return {
               content: [{ type: "text", text: "" }],
               details: { text: "", path: params.id },
             };
           }
-          await store.recordAccess([memoryId]);
-          const entry = await store.get(memoryId);
           return {
-            content: [{ type: "text", text: JSON.stringify(entry ?? exists, null, 2) }],
-            details: entry ?? exists,
+            content: [{ type: "text", text: JSON.stringify(entry, null, 2) }],
+            details: entry,
           };
         } catch (error) {
           return toolError(error);
@@ -731,8 +730,6 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
               details: { action: "none" },
             };
           }
-
-          // 始终返回候选列表，让用户明确指定 id 后再删除
           const list = candidates
             .map((c) => `- ${c.id} (${(c.score * 100).toFixed(0)}%) [${c.category ?? "memory"}] ${c.content.slice(0, 80)}`)
             .join("\n");
@@ -859,8 +856,6 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
               details: { variants, results: fullResults },
             };
           }
-
-          // 非 full 模式：返回 snippet（前 200 字符）而非全文，减少 token 消耗
           const snippetResults = results.map((r) => ({
             id: r.id,
             title: r.title,
@@ -1001,8 +996,6 @@ const plugin = {
   configSchema: pluginConfigSchema,
   async register(api: OpenClawPluginApi) {
     const config = resolveConfig(api.pluginConfig);
-
-    // 并行初始化，但 await 两者完成后再返回，保证工具和 hook 在 register() 返回前全部就绪
     const qmdReaderPromise = createQmdReader({
       indexName: config.indexName,
       dbPath: config.dbPath,

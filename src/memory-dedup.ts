@@ -76,7 +76,12 @@ export function mergeContents(existing: string, incoming: string): string {
   }
   const merged = existing + "\n\n---\n\n" + incoming;
   if (merged.length > MAX_MERGED_LENGTH) {
-    return merged.slice(0, MAX_MERGED_LENGTH);
+    const truncated = merged.slice(0, MAX_MERGED_LENGTH);
+    const lastSentence = truncated.search(/[.!?。！？]\s*[^.!?。！？]*$/);
+    if (lastSentence > MAX_MERGED_LENGTH * 0.8) {
+      return truncated.slice(0, lastSentence + 1);
+    }
+    return truncated;
   }
   return merged;
 }
