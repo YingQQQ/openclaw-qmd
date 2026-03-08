@@ -86,10 +86,24 @@ export function detectErrorFixPattern(messages: unknown[]): ErrorRecord[] {
 // File operations
 // ---------------------------------------------------------------------------
 
+const MAX_FILE_ENTRIES = 200;
+
 function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
+}
+
+/**
+ * Trim a "---"-separated file to keep only the most recent entries.
+ */
+function trimFileEntries(filePath: string, maxEntries: number): void {
+  if (!existsSync(filePath)) return;
+  const text = readFileSync(filePath, "utf-8");
+  const blocks = text.split(/^---$/m).filter((b) => b.trim());
+  if (blocks.length <= maxEntries) return;
+  const kept = blocks.slice(-maxEntries);
+  writeFileSync(filePath, kept.join("\n---\n") + "\n---\n\n", "utf-8");
 }
 
 /**
@@ -115,6 +129,7 @@ export function appendLearning(
   } else {
     writeFileSync(filePath, entry, "utf-8");
   }
+  trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
 /**
@@ -144,6 +159,7 @@ export function appendError(
   } else {
     writeFileSync(filePath, entry, "utf-8");
   }
+  trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
 /**

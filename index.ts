@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createQmdReader, addLineNumbers, type QmdReader } from "./src/qmd-reader.js";
-import { createMemoryStore, type MemoryStore } from "./src/memory-store.js";
+import { createMemoryStore, type MemoryStore, type CompactPolicyConfig, type PreconsciousPolicyConfig } from "./src/memory-store.js";
 import { createRecallHook, createCaptureHook } from "./src/memory-hooks.js";
 import { buildQueryVariants, searchWithQueryVariants } from "./src/query-rewrite.js";
 import { inferCategoryWeights } from "./src/query-intent.js";
@@ -409,6 +409,82 @@ const memoryObservationReviewParameters = Type.Object({
   }),
 });
 
+async function executeMemorySearch(
+  store: MemoryStore,
+  config: PluginConfig,
+  searchFn: MemoryStore["search"],
+  query: string,
+  limit: number,
+  minScore: number,
+  candidateMultiplier: number,
+  emptyMessage: string,
+) {
+  const candidateLimit = Math.max(limit * candidateMultiplier, 10);
+  const { variants, results: rawResults } = await searchWithQueryVariants(
+    searchFn,
+    query,
+    candidateLimit,
+    minScore,
+  );
+  const scored = postProcess(
+    rawResults.map((r) => ({
+      id: r.id,
+      content: r.content,
+      category: r.category,
+      score: r.score,
+      created: r.created,
+      accessCount: r.accessCount,
+      lastAccessedAt: r.lastAccessedAt,
+      importance: r.importance,
+      confidence: r.confidence,
+      sourceType: r.sourceType,
+      expiresAt: r.expiresAt,
+    })),
+    {
+      minScore,
+      categoryWeights: inferCategoryWeights(query),
+    },
+  );
+  const recalledMap = new Map(rawResults.map((r) => [r.id, r]));
+  const results = scored
+    .map((item) => {
+      const original = recalledMap.get(item.id);
+      return original ? { ...original, score: item.score } : null;
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .slice(0, limit);
+  await store.recordAccess(results.map((item) => item.id));
+  if (!results.length) {
+    return {
+      content: [{ type: "text" as const, text: emptyMessage }],
+      details: [],
+    };
+  }
+  const summaryResults = results.map((r) => ({
+    id: r.id,
+    category: r.category,
+    archived: r.archived ?? false,
+    score: r.score,
+    created: r.created,
+    summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
+  }));
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(summaryResults, null, 2) }],
+    details: {
+      variants,
+      results,
+    },
+  };
+}
+
+function toolError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    content: [{ type: "text" as const, text: `Error: ${message}` }],
+    details: { error: message },
+  };
+}
+
 function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, store: MemoryStore) {
   api.registerTool(
     {
@@ -417,67 +493,17 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Search stored memories using hybrid retrieval, metadata-aware reranking, and summaries.",
       parameters: memorySearchParameters,
       async execute(_id, params) {
-        const limit = (params.limit as number) ?? config.autoRecallLimit!;
-        const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
-        const query = params.query as string;
-        const includeArchived = (params.includeArchived as boolean | undefined) ?? false;
-        const candidateLimit = includeArchived ? Math.max(limit * 3, 10) : limit;
-        const { variants, results: rawResults } = await searchWithQueryVariants(
-          includeArchived ? store.searchWithArchived : store.search,
-          query,
-          candidateLimit,
-          minScore,
-        );
-        const scored = postProcess(
-          rawResults.map((r) => ({
-            id: r.id,
-            content: r.content,
-            category: r.category,
-            score: r.score,
-            created: r.created,
-            accessCount: r.accessCount,
-            lastAccessedAt: r.lastAccessedAt,
-            importance: r.importance,
-            confidence: r.confidence,
-            sourceType: r.sourceType,
-            expiresAt: r.expiresAt,
-          })),
-          {
-            minScore,
-            categoryWeights: inferCategoryWeights(query),
-          },
-        );
-        const recalledMap = new Map(rawResults.map((r) => [r.id, r]));
-        const results = scored
-          .map((item) => {
-            const original = recalledMap.get(item.id);
-            return original ? { ...original, score: item.score } : null;
-          })
-          .filter((item): item is NonNullable<typeof item> => item !== null)
-          .slice(0, limit);
-        await store.recordAccess(results.map((item) => item.id));
-        if (!results.length) {
-          return {
-            content: [{ type: "text", text: "No matching memories found." }],
-            details: [],
-          };
+        try {
+          const limit = (params.limit as number) ?? config.autoRecallLimit!;
+          const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
+          const query = params.query as string;
+          const includeArchived = (params.includeArchived as boolean | undefined) ?? false;
+          const searchFn = includeArchived ? store.searchWithArchived : store.search;
+          const multiplier = includeArchived ? 3 : 1;
+          return executeMemorySearch(store, config, searchFn, query, limit, minScore, multiplier, "No matching memories found.");
+        } catch (error) {
+          return toolError(error);
         }
-        // 返回分层摘要而非全文，减少 token 消耗；agent 可用 memory_get 获取完整内容
-        const summaryResults = results.map((r) => ({
-          id: r.id,
-          category: r.category,
-          archived: r.archived ?? false,
-          score: r.score,
-          created: r.created,
-          summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
-        }));
-        return {
-          content: [{ type: "text", text: JSON.stringify(summaryResults, null, 2) }],
-          details: {
-            variants,
-            results,
-          },
-        };
       },
     },
     { optional: true },
@@ -490,20 +516,24 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Read a specific memory entry by id.",
       parameters: memoryGetParameters,
       async execute(_id, params) {
-        const memoryId = params.id as string;
-        const entry = await store.get(memoryId);
-        if (!entry) {
+        try {
+          const memoryId = params.id as string;
+          const exists = await store.get(memoryId);
+          if (!exists) {
+            return {
+              content: [{ type: "text", text: "" }],
+              details: { text: "", path: params.id },
+            };
+          }
+          await store.recordAccess([memoryId]);
+          const entry = await store.get(memoryId);
           return {
-            content: [{ type: "text", text: "" }],
-            details: { text: "", path: params.id },
+            content: [{ type: "text", text: JSON.stringify(entry ?? exists, null, 2) }],
+            details: entry ?? exists,
           };
+        } catch (error) {
+          return toolError(error);
         }
-        await store.recordAccess([memoryId]);
-        const refreshed = await store.get(memoryId);
-        return {
-          content: [{ type: "text", text: JSON.stringify(refreshed ?? entry, null, 2) }],
-          details: refreshed ?? entry,
-        };
       },
     },
     { optional: true },
@@ -516,65 +546,14 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Search archived long-term memories for historical context and compaction audit.",
       parameters: memorySearchParameters,
       async execute(_id, params) {
-        const limit = (params.limit as number) ?? config.autoRecallLimit!;
-        const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
-        const query = params.query as string;
-        const candidateLimit = Math.max(limit * 3, 10);
-        const { variants, results: rawResults } = await searchWithQueryVariants(
-          store.searchArchived,
-          query,
-          candidateLimit,
-          minScore,
-        );
-        const scored = postProcess(
-          rawResults.map((r) => ({
-            id: r.id,
-            content: r.content,
-            category: r.category,
-            score: r.score,
-            created: r.created,
-            accessCount: r.accessCount,
-            lastAccessedAt: r.lastAccessedAt,
-            importance: r.importance,
-            confidence: r.confidence,
-            sourceType: r.sourceType,
-            expiresAt: r.expiresAt,
-          })),
-          {
-            minScore,
-            categoryWeights: inferCategoryWeights(query),
-          },
-        );
-        const recalledMap = new Map(rawResults.map((r) => [r.id, r]));
-        const finalResults = scored
-          .map((item) => {
-            const original = recalledMap.get(item.id);
-            return original ? { ...original, score: item.score } : null;
-          })
-          .filter((item): item is NonNullable<typeof item> => item !== null)
-          .slice(0, limit);
-        await store.recordAccess(finalResults.map((item) => item.id));
-        if (!finalResults.length) {
-          return {
-            content: [{ type: "text", text: "No matching archived memories found." }],
-            details: [],
-          };
+        try {
+          const limit = (params.limit as number) ?? config.autoRecallLimit!;
+          const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
+          const query = params.query as string;
+          return executeMemorySearch(store, config, store.searchArchived, query, limit, minScore, 3, "No matching archived memories found.");
+        } catch (error) {
+          return toolError(error);
         }
-        const summaryResults = finalResults.map((r) => ({
-          id: r.id,
-          category: r.category,
-          archived: r.archived ?? false,
-          score: r.score,
-          created: r.created,
-          summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
-        }));
-        return {
-          content: [{ type: "text", text: JSON.stringify(summaryResults, null, 2) }],
-          details: {
-            variants,
-            results: finalResults,
-          },
-        };
       },
     },
     { optional: true },
@@ -587,11 +566,15 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Show memory totals, archived counts, stage distribution, and category-level observability.",
       parameters: memoryStatsParameters,
       async execute() {
-        const stats = await store.getStats();
-        return {
-          content: [{ type: "text", text: JSON.stringify(stats, null, 2) }],
-          details: stats,
-        };
+        try {
+          const stats = await store.getStats();
+          return {
+            content: [{ type: "text", text: JSON.stringify(stats, null, 2) }],
+            details: stats,
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       },
     },
     { optional: true },
@@ -604,27 +587,31 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "List active staged observations for manual review.",
       parameters: memoryObservationListParameters,
       async execute(_id, params) {
-        const limit = (params.limit as number | undefined) ?? 10;
-        const minConfidence = (params.minConfidence as number | undefined) ?? 0;
-        const items = await store.listObservations(limit, minConfidence);
-        if (!items.length) {
+        try {
+          const limit = (params.limit as number | undefined) ?? 10;
+          const minConfidence = (params.minConfidence as number | undefined) ?? 0;
+          const items = await store.listObservations(limit, minConfidence);
+          if (!items.length) {
+            return {
+              content: [{ type: "text", text: "No active observations found." }],
+              details: [],
+            };
+          }
+          const summary = items.map((item) => ({
+            id: item.id,
+            category: item.category,
+            confidence: item.confidence,
+            importance: item.importance,
+            created: item.created,
+            summary: item.summary ?? item.abstract ?? (item.content.length > 160 ? item.content.slice(0, 160) + "..." : item.content),
+          }));
           return {
-            content: [{ type: "text", text: "No active observations found." }],
-            details: [],
+            content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+            details: items,
           };
+        } catch (error) {
+          return toolError(error);
         }
-        const summary = items.map((item) => ({
-          id: item.id,
-          category: item.category,
-          confidence: item.confidence,
-          importance: item.importance,
-          created: item.created,
-          summary: item.summary ?? item.abstract ?? (item.content.length > 160 ? item.content.slice(0, 160) + "..." : item.content),
-        }));
-        return {
-          content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
-          details: items,
-        };
       },
     },
     { optional: true },
@@ -637,14 +624,18 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Manually promote, archive, or drop a staged observation.",
       parameters: memoryObservationReviewParameters,
       async execute(_id, params) {
-        const result = await store.reviewObservation(
-          params.id as string,
-          params.action as "promote" | "drop" | "archive",
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: result,
-        };
+        try {
+          const result = await store.reviewObservation(
+            params.id as string,
+            params.action as "promote" | "drop" | "archive",
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       },
     },
     { optional: true },
@@ -657,21 +648,25 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Write a new memory entry. Automatically deduplicates (skip/update/merge) against existing memories.",
       parameters: memoryWriteParameters,
       async execute(_id, params) {
-        const entry = await store.write(
-          params.content as string,
-          params.category as string | undefined,
-          params.tags as string[] | undefined,
-          params.title as string | undefined,
-          {
-            importance: params.importance as number | undefined,
-            confidence: params.confidence as number | undefined,
-            expiresAt: params.expiresAt as string | undefined,
-          },
-        );
-        return {
-          content: [{ type: "text", text: `Memory stored: ${entry.id}` }],
-          details: entry,
-        };
+        try {
+          const entry = await store.write(
+            params.content as string,
+            params.category as string | undefined,
+            params.tags as string[] | undefined,
+            params.title as string | undefined,
+            {
+              importance: params.importance as number | undefined,
+              confidence: params.confidence as number | undefined,
+              expiresAt: params.expiresAt as string | undefined,
+            },
+          );
+          return {
+            content: [{ type: "text", text: `Memory stored: ${entry.id}` }],
+            details: entry,
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       },
     },
     { optional: true },
@@ -684,11 +679,15 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Promote staged observations, archive stale or expired memories, and refresh long-term memory quality.",
       parameters: memoryCompactParameters,
       async execute() {
-        const report = await store.compact();
-        return {
-          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
-          details: report,
-        };
+        try {
+          const report = await store.compact();
+          return {
+            content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+            details: report,
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       },
     },
     { optional: true },
@@ -701,54 +700,49 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Delete a memory by id, or search for a memory to delete.",
       parameters: memoryForgetParameters,
       async execute(_id, params) {
-        const directId = params.id as string | undefined;
-        if (directId) {
-          const deleted = await store.delete(directId);
-          if (deleted) {
+        try {
+          const directId = params.id as string | undefined;
+          if (directId) {
+            const deleted = await store.delete(directId);
+            if (deleted) {
+              return {
+                content: [{ type: "text", text: `Forgotten: ${directId}` }],
+                details: { action: "deleted", id: directId },
+              };
+            }
             return {
-              content: [{ type: "text", text: `Forgotten: ${directId}` }],
-              details: { action: "deleted", id: directId },
+              content: [{ type: "text", text: `Memory not found: ${directId}` }],
+              details: { action: "not_found", id: directId },
             };
           }
-          return {
-            content: [{ type: "text", text: `Memory not found: ${directId}` }],
-            details: { action: "not_found", id: directId },
-          };
-        }
 
-        const query = params.query as string | undefined;
-        if (!query) {
-          return {
-            content: [{ type: "text", text: "Provide id or query." }],
-            details: { error: "missing_param" },
-          };
-        }
+          const query = params.query as string | undefined;
+          if (!query) {
+            return {
+              content: [{ type: "text", text: "Provide id or query." }],
+              details: { error: "missing_param" },
+            };
+          }
 
-        const candidates = await store.search(query, 5, 0.3);
-        if (!candidates.length) {
-          return {
-            content: [{ type: "text", text: "No matching memories found." }],
-            details: { action: "none" },
-          };
-        }
+          const candidates = await store.search(query, 5, 0.3);
+          if (!candidates.length) {
+            return {
+              content: [{ type: "text", text: "No matching memories found." }],
+              details: { action: "none" },
+            };
+          }
 
-        // 高分单一匹配自动删除
-        if (candidates.length === 1 && candidates[0].score >= 0.85) {
-          const deleted = await store.delete(candidates[0].id);
+          // 始终返回候选列表，让用户明确指定 id 后再删除
+          const list = candidates
+            .map((c) => `- ${c.id} (${(c.score * 100).toFixed(0)}%) [${c.category ?? "memory"}] ${c.content.slice(0, 80)}`)
+            .join("\n");
           return {
-            content: [{ type: "text", text: deleted ? `Forgotten: ${candidates[0].id}` : `Failed to delete: ${candidates[0].id}` }],
-            details: { action: deleted ? "deleted" : "failed", id: candidates[0].id },
+            content: [{ type: "text", text: `Found ${candidates.length} candidate(s). Use memory_forget with the exact id to delete:\n${list}` }],
+            details: { action: "candidates", candidates },
           };
+        } catch (error) {
+          return toolError(error);
         }
-
-        // 多条候选：返回列表
-        const list = candidates
-          .map((c) => `- ${c.id} (${(c.score * 100).toFixed(0)}%) [${c.category ?? "memory"}] ${c.content.slice(0, 80)}`)
-          .join("\n");
-        return {
-          content: [{ type: "text", text: `Found ${candidates.length} candidates. Specify id:\n${list}` }],
-          details: { action: "candidates", candidates },
-        };
       },
     },
     { optional: true },
@@ -803,81 +797,85 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
       description: "Search qmd using BM25 full-text search. Supports plain query or structured lex sub-queries.",
       parameters: queryParameters,
       async execute(_id, params) {
-        const queryText = buildQueryText(params);
-        if (!queryText.trim()) {
-          return {
-            content: [{ type: "text", text: "qmd_query requires either query or searches." }],
-            isError: true,
-            details: { reason: "missing_query" },
-          };
-        }
+        try {
+          const queryText = buildQueryText(params);
+          if (!queryText.trim()) {
+            return {
+              content: [{ type: "text", text: "qmd_query requires either query or searches." }],
+              isError: true,
+              details: { reason: "missing_query" },
+            };
+          }
 
-        const limit = (params.limit as number) ?? 10;
-        const minScore = params.minScore as number | undefined;
-        const collection = params.collection as string | undefined;
-        const variants = buildQueryVariants(queryText);
-        const merged = new Map<string, ReturnType<QmdReader["query"]>[number]>();
-        const perQueryLimit = Math.max(limit, Math.min(limit * 2, 20));
+          const limit = (params.limit as number) ?? 10;
+          const minScore = params.minScore as number | undefined;
+          const collection = params.collection as string | undefined;
+          const variants = buildQueryVariants(queryText);
+          const merged = new Map<string, ReturnType<QmdReader["query"]>[number]>();
+          const perQueryLimit = Math.max(limit, Math.min(limit * 2, 20));
 
-        for (const variant of variants) {
-          const hits = reader.query(variant, perQueryLimit, collection);
-          for (const hit of hits) {
-            const existing = merged.get(hit.id);
-            if (!existing || hit.score > existing.score) {
-              merged.set(hit.id, hit);
+          for (const variant of variants) {
+            const hits = reader.query(variant, perQueryLimit, collection);
+            for (const hit of hits) {
+              const existing = merged.get(hit.id);
+              if (!existing || hit.score > existing.score) {
+                merged.set(hit.id, hit);
+              }
             }
           }
-        }
 
-        let results = [...merged.values()]
-          .sort((a, b) => b.score - a.score)
-          .slice(0, limit);
-        if (minScore !== undefined) {
-          results = results.filter((r) => r.score >= minScore);
-        }
-        const reranked = postProcess(
-          results.map((r) => ({
+          let results = [...merged.values()]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit);
+          if (minScore !== undefined) {
+            results = results.filter((r) => r.score >= minScore);
+          }
+          const reranked = postProcess(
+            results.map((r) => ({
+              id: r.id,
+              content: r.content,
+              title: r.title,
+              score: r.score,
+            }) satisfies ScoredResult),
+            {
+              minScore,
+            },
+          );
+          const resultMap = new Map(results.map((r) => [r.id, r]));
+          results = reranked
+            .map((item) => resultMap.get(item.id))
+            .filter((item): item is NonNullable<typeof item> => item !== undefined);
+
+          if (params.full) {
+            const fullResults = results.map((r) => {
+              let body = reader.getDocumentBody(r.id) ?? r.content;
+              if (params.lineNumbers) {
+                body = addLineNumbers(body);
+              }
+              return { ...r, content: body };
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(fullResults, null, 2) }],
+              details: { variants, results: fullResults },
+            };
+          }
+
+          // 非 full 模式：返回 snippet（前 200 字符）而非全文，减少 token 消耗
+          const snippetResults = results.map((r) => ({
             id: r.id,
-            content: r.content,
             title: r.title,
+            collection: r.collection,
             score: r.score,
-          }) satisfies ScoredResult),
-          {
-            minScore,
-          },
-        );
-        const resultMap = new Map(results.map((r) => [r.id, r]));
-        results = reranked
-          .map((item) => resultMap.get(item.id))
-          .filter((item): item is NonNullable<typeof item> => item !== undefined);
+            snippet: r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content,
+          }));
 
-        if (params.full) {
-          const fullResults = results.map((r) => {
-            let body = reader.getDocumentBody(r.id) ?? r.content;
-            if (params.lineNumbers) {
-              body = addLineNumbers(body);
-            }
-            return { ...r, content: body };
-          });
           return {
-            content: [{ type: "text", text: JSON.stringify(fullResults, null, 2) }],
-            details: { variants, results: fullResults },
+            content: [{ type: "text", text: JSON.stringify(snippetResults, null, 2) }],
+            details: { variants, results: snippetResults },
           };
+        } catch (error) {
+          return toolError(error);
         }
-
-        // 非 full 模式：返回 snippet（前 200 字符）而非全文，减少 token 消耗
-        const snippetResults = results.map((r) => ({
-          id: r.id,
-          title: r.title,
-          collection: r.collection,
-          score: r.score,
-          snippet: r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content,
-        }));
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(snippetResults, null, 2) }],
-          details: { variants, results: snippetResults },
-        };
       },
     },
     { optional: true },
@@ -1026,11 +1024,13 @@ const plugin = {
           hybridScanLimit: config.hybridScanLimit,
           hybridLexicalWeight: config.hybridLexicalWeight,
           hybridSemanticWeight: config.hybridSemanticWeight,
-          compactPolicy: (config.compactPolicy as Record<string, unknown> | undefined)?.default as any,
-          compactCategoryPolicies: config.compactPolicy as any,
-          preconsciousPolicy: config.preconsciousPolicy as any,
+          compactPolicy: (config.compactPolicy as Partial<Record<string, Partial<CompactPolicyConfig>>> | undefined)?.default,
+          compactCategoryPolicies: config.compactPolicy as Partial<Record<string, Partial<CompactPolicyConfig>>> | undefined,
+          preconsciousPolicy: config.preconsciousPolicy as Partial<PreconsciousPolicyConfig> | undefined,
         }).then((store) => {
           registerMemoryFeatures(api, config, store);
+        }).catch((err) => {
+          console.error(`[qmd] Failed to initialize memory store: ${err}`);
         })
       : Promise.resolve();
 

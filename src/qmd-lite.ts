@@ -28,6 +28,8 @@ export interface Database {
   exec(sql: string): void;
   prepare(sql: string): Statement;
   close(): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transaction(fn: (...args: any[]) => any): (...args: any[]) => any;
 }
 
 let _DatabaseCtor: new (path: string) => Database;
@@ -137,12 +139,16 @@ export function ensureSchema(db: Database): void {
   ensureColumn(db, "documents", "aliases", "TEXT");
 }
 
+const VALID_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
 function ensureColumn(
   db: Database,
   table: string,
   column: string,
   definition: string,
 ): void {
+  if (!VALID_IDENTIFIER.test(table)) throw new Error(`Invalid table name: ${table}`);
+  if (!VALID_IDENTIFIER.test(column)) throw new Error(`Invalid column name: ${column}`);
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (cols.some((item) => item.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);

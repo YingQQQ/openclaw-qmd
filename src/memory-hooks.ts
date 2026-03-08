@@ -39,6 +39,11 @@ const PROMPT_INJECTION_PATTERNS = [
   /developer\s+message/i,
   /<\s*(system|assistant|developer|tool|function|relevant-memories)\b/i,
   /\b(run|execute|call|invoke)\b.{0,40}\b(tool|command)\b/i,
+  /<\|im_start\|>/i,
+  /<\|im_end\|>/i,
+  /<!--\s*(system|assistant|developer|instruction)/i,
+  /\[INST\]/i,
+  /\[\/INST\]/i,
 ];
 
 const PROMPT_ESCAPE_MAP: Record<string, string> = {

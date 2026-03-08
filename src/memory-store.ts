@@ -317,8 +317,15 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     mkdirSync(config.memoryDir, { recursive: true });
   }
 
+  function sanitizeId(id: string): string {
+    // Strip path separators and traversal sequences to prevent directory traversal
+    const base = path.basename(id).replace(/\.\./g, "");
+    if (!base) throw new Error(`Invalid memory id: ${JSON.stringify(id)}`);
+    return base;
+  }
+
   function memoryFilePath(id: string): string {
-    return path.join(config.memoryDir, `${id}.md`);
+    return path.join(config.memoryDir, `${sanitizeId(id)}.md`);
   }
 
   function pendingSessionPath(): string {
@@ -887,24 +894,33 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           stage: "observation",
           category: latest.category ?? undefined,
         });
-        for (const item of items) {
-          const doc = findDocumentByPath(db, collection, item.id);
-          if (doc) {
-            updateDocument(db, doc.id, {
-              archived: 1,
-              modifiedAt: now,
-            });
-            await syncEntryFileFromDb(item.id);
-            archived += 1;
-            archivedIds.push(item.id);
-            actions.push({
-              action: "archive",
-              id: item.id,
-              reason: `observation archived after promotion into ${promotedEntry.id}`,
-              stage: "observation",
-              category: item.category ?? undefined,
-            });
+        // Archive all observations in a single transaction for atomicity
+        const archivedInTxn: typeof items = [];
+        const archiveObservations = db.transaction(() => {
+          for (const item of items) {
+            const doc = findDocumentByPath(db, collection, item.id);
+            if (doc) {
+              updateDocument(db, doc.id, {
+                archived: 1,
+                modifiedAt: now,
+              });
+              archivedInTxn.push(item);
+            }
           }
+        });
+        archiveObservations();
+        // Update counters and sync files outside transaction
+        for (const item of archivedInTxn) {
+          archived += 1;
+          archivedIds.push(item.id);
+          actions.push({
+            action: "archive",
+            id: item.id,
+            reason: `observation archived after promotion into ${promotedEntry.id}`,
+            stage: "observation",
+            category: item.category ?? undefined,
+          });
+          await syncEntryFileFromDb(item.id);
         }
       } else {
         skipped += items.length;
@@ -962,14 +978,22 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         });
       }
 
-      for (const item of items) {
-        const doc = findDocumentByPath(db, collection, item.id);
-        if (!doc) continue;
-        updateDocument(db, doc.id, {
-          archived: 1,
-          modifiedAt: now,
-        });
-        await syncEntryFileFromDb(item.id);
+      // Archive stale/expired memories in a single transaction for atomicity
+      const archivedMemsInTxn: typeof items = [];
+      const archiveMemories = db.transaction(() => {
+        for (const item of items) {
+          const doc = findDocumentByPath(db, collection, item.id);
+          if (!doc) continue;
+          updateDocument(db, doc.id, {
+            archived: 1,
+            modifiedAt: now,
+          });
+          archivedMemsInTxn.push(item);
+        }
+      });
+      archiveMemories();
+      // Update counters and sync files outside transaction
+      for (const item of archivedMemsInTxn) {
         archived += 1;
         archivedIds.push(item.id);
         actions.push({
@@ -981,6 +1005,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           stage: "memory",
           category: item.category ?? undefined,
         });
+        await syncEntryFileFromDb(item.id);
       }
     }
 

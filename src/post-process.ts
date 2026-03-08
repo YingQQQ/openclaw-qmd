@@ -148,7 +148,7 @@ export function applyExpiryPenalty(
     .map((r) => {
       if (!r.expiresAt) return { ...r };
       const daysLeft = (new Date(r.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
-      const nearExpiryFactor = daysLeft <= 1 ? 1 + penalty : 1;
+      const nearExpiryFactor = daysLeft <= 1 ? 1 - penalty : 1;
       return { ...r, score: r.score * nearExpiryFactor };
     });
 }
