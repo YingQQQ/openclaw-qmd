@@ -1,43 +1,75 @@
-import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
-  openDatabase,
+  deleteDocument,
   ensureSchema,
-  searchFTSExtended,
+  findDocumentByPath,
   hashContent,
   insertContent,
   insertDocumentExtended,
-  updateDocument,
+  openDatabase,
+  scanDocumentsExtended,
+  searchFTSExtended,
   updateAccessCount,
-  deleteDocument,
-  findDocumentByPath,
+  updateDocument,
   type Database,
+  type DocumentScanRow,
   type FTSResultExtended,
 } from "./qmd-lite.js";
 import {
-  generateMemoryId,
   formatMemoryFile,
+  generateMemoryId,
   parseMemoryFile,
   type MemoryEntry,
 } from "./memory-format.js";
+import { fuseRankedResults, rankSemanticMatches } from "./hybrid-retrieval.js";
 import { generateAbstract, generateSummary } from "./layered-context.js";
-import {
-  getDedupeDecision,
-  mergeContents,
-  type ExistingMatch,
-} from "./memory-dedup.js";
+import { getDedupeDecision, mergeContents, type ExistingMatch } from "./memory-dedup.js";
 
 export type MemoryStoreConfig = {
   memoryDir: string;
   dbPath?: string;
   collection?: string;
   scope?: string;
+  hybridEnabled?: boolean;
+  hybridScanLimit?: number;
+  hybridLexicalWeight?: number;
+  hybridSemanticWeight?: number;
+  compactPolicy?: Partial<CompactPolicyConfig>;
+  compactCategoryPolicies?: Partial<Record<string, Partial<CompactPolicyConfig>>>;
+  preconsciousPolicy?: Partial<PreconsciousPolicyConfig>;
+};
+
+export type CompactPolicyConfig = {
+  promoteOccurrences: number;
+  promoteConfidence: number;
+  promoteImportance: number;
+  archiveAfterDays: number;
+  summarizeBeforeArchive: boolean;
+};
+
+export type PreconsciousPolicyConfig = {
+  importanceWeight: number;
+  confidenceWeight: number;
+  recencyWeight: number;
+  maxAgeDays: number;
+  categoryBoosts: Record<string, number>;
+};
+
+export type MemoryWriteOptions = {
+  importance?: number;
+  confidence?: number;
+  sourceType?: string;
+  stage?: "memory" | "observation";
+  expiresAt?: string;
+  aliases?: string[];
+  skipDedupe?: boolean;
 };
 
 export type RecalledMemory = {
   id: string;
   content: string;
+  title?: string;
   category?: string;
   score: number;
   docId?: number;
@@ -46,28 +78,235 @@ export type RecalledMemory = {
   abstract?: string;
   summary?: string;
   created?: string;
+  importance?: number;
+  confidence?: number;
+  sourceType?: string;
+  stage?: "memory" | "observation";
+  expiresAt?: string;
+  archived?: boolean;
+  aliases?: string[];
+};
+
+export type CompactReport = {
+  promoted: number;
+  archived: number;
+  skipped: number;
+  summarized: number;
+  promotedIds: string[];
+  archivedIds: string[];
+  skippedIds: string[];
+  summarizedIds: string[];
+  actions: Array<{
+    action: "promote" | "archive" | "skip" | "summarize";
+    id: string;
+    reason: string;
+    stage?: string;
+    category?: string;
+  }>;
+};
+
+export type PreconsciousItem = {
+  id: string;
+  content: string;
+  category?: string;
+  score: number;
+  abstract?: string;
+  summary?: string;
+  created?: string;
+};
+
+export type PendingSessionPayload = {
+  storedAt: string;
+  entries: Array<{
+    content: string;
+    category?: string;
+    tags?: string[];
+    title?: string;
+    confidence?: number;
+    importance?: number;
+  }>;
+};
+
+export type MemoryStats = {
+  total: number;
+  active: number;
+  archived: number;
+  memory: number;
+  observations: number;
+  expiredActive: number;
+  categories: Record<string, {
+    total: number;
+    active: number;
+    archived: number;
+    memory: number;
+    observations: number;
+  }>;
+  stages: Record<string, number>;
+  sourceTypes: Record<string, number>;
 };
 
 export type MemoryStore = {
-  write(content: string, category?: string, tags?: string[], title?: string): Promise<MemoryEntry>;
+  write(content: string, category?: string, tags?: string[], title?: string, options?: MemoryWriteOptions): Promise<MemoryEntry>;
+  writeObservation(content: string, category?: string, tags?: string[], title?: string, options?: MemoryWriteOptions): Promise<MemoryEntry>;
   search(query: string, limit: number, minScore: number): Promise<RecalledMemory[]>;
+  searchWithArchived(query: string, limit: number, minScore: number): Promise<RecalledMemory[]>;
+  searchArchived(query: string, limit: number, minScore: number): Promise<RecalledMemory[]>;
+  listObservations(limit: number, minConfidence?: number): Promise<RecalledMemory[]>;
+  reviewObservation(id: string, action: "promote" | "drop" | "archive"): Promise<{ action: string; reviewed: boolean; promotedId?: string }>;
   get(id: string): Promise<MemoryEntry | null>;
+  getStats(): Promise<MemoryStats>;
   delete(id: string): Promise<boolean>;
   ensureCollection(): void;
   reindex(): Promise<void>;
+  compact(): Promise<CompactReport>;
+  buildPreconscious(limit: number): Promise<PreconsciousItem[]>;
+  persistPendingSession(payload: PendingSessionPayload): Promise<void>;
+  clearPendingSession(): Promise<void>;
+  recoverPendingSession(): Promise<number>;
+  recordAccess(ids: string[]): Promise<void>;
   close(): void;
 };
 
 const DEFAULT_COLLECTION = "memories";
+const PENDING_SESSION_FILE = "pending-session.json";
+const MAX_SUMMARY_ITEMS_PER_CLUSTER = 4;
+const processClosers = new Set<() => void>();
+let exitHookInstalled = false;
+
+const CATEGORY_POLICIES: Record<string, CompactPolicyConfig> = {
+  profile: { promoteOccurrences: 1, promoteConfidence: 0.75, promoteImportance: 0.75, archiveAfterDays: 365, summarizeBeforeArchive: false },
+  preference: { promoteOccurrences: 1, promoteConfidence: 0.65, promoteImportance: 0.7, archiveAfterDays: 240, summarizeBeforeArchive: false },
+  entity: { promoteOccurrences: 1, promoteConfidence: 0.7, promoteImportance: 0.7, archiveAfterDays: 180, summarizeBeforeArchive: false },
+  event: { promoteOccurrences: 2, promoteConfidence: 0.8, promoteImportance: 0.8, archiveAfterDays: 45, summarizeBeforeArchive: true },
+  case: { promoteOccurrences: 1, promoteConfidence: 0.72, promoteImportance: 0.82, archiveAfterDays: 90, summarizeBeforeArchive: true },
+  pattern: { promoteOccurrences: 2, promoteConfidence: 0.7, promoteImportance: 0.75, archiveAfterDays: 300, summarizeBeforeArchive: false },
+  default: { promoteOccurrences: 2, promoteConfidence: 0.72, promoteImportance: 0.72, archiveAfterDays: 120, summarizeBeforeArchive: false },
+};
+
+const DEFAULT_PRECONSCIOUS_POLICY: PreconsciousPolicyConfig = {
+  importanceWeight: 0.5,
+  confidenceWeight: 0.3,
+  recencyWeight: 0.2,
+  maxAgeDays: 30,
+  categoryBoosts: {
+    case: 0.12,
+    event: 0.08,
+    preference: 0.05,
+    profile: 0.04,
+    entity: 0.03,
+    pattern: 0.06,
+  },
+};
+
+function installProcessExitHook() {
+  if (exitHookInstalled) return;
+  process.on("exit", () => {
+    for (const close of [...processClosers]) {
+      try {
+        close();
+      } catch {
+        // ignore shutdown cleanup errors
+      }
+    }
+  });
+  exitHookInstalled = true;
+}
 
 function resolveDbPath(config: MemoryStoreConfig): string {
   return config.dbPath ?? path.join(config.memoryDir, "memories.db");
 }
 
+function normalizeKey(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function parseStoredDocumentContent(text: string): { content: string; tags?: string[]; aliases?: string[] } {
+  const lines = text.split("\n");
+  const tagsLine = lines.find((line) => /^tags:\s+/i.test(line.trim()));
+  const aliasesLine = lines.find((line) => /^aliases:\s+/i.test(line.trim()));
+  const content = lines
+    .filter((line, index) => {
+      if (index === 0 && /^\[[^\]]+\]$/.test(line.trim())) return false;
+      if (/^tags:\s+/i.test(line.trim())) return false;
+      if (/^aliases:\s+/i.test(line.trim())) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+
+  const tags = tagsLine
+    ? tagsLine.replace(/^tags:\s+/i, "").split(/\s+/).map((item) => item.trim()).filter(Boolean)
+    : undefined;
+  const aliases = aliasesLine
+    ? aliasesLine.replace(/^aliases:\s+/i, "").split("|").map((item) => item.trim()).filter(Boolean)
+    : undefined;
+
+  return { content, tags, aliases };
+}
+
+function normalizeStoredContent(text: string): string {
+  return normalizeKey(parseStoredDocumentContent(text).content);
+}
+
+function clamp01(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(1, Number(value)));
+}
+
+function daysBetween(from: string, to = new Date().toISOString()): number {
+  return Math.max(0, (new Date(to).getTime() - new Date(from).getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function summarizeCluster(items: DocumentScanRow[]): string {
+  const sorted = [...items]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, MAX_SUMMARY_ITEMS_PER_CLUSTER);
+  return [
+    `Compaction summary for ${sorted[0]?.category ?? "memory"} items:`,
+    ...sorted.map((item) => {
+      const date = item.createdAt.slice(0, 10);
+      const text = item.summary ?? item.abstract ?? item.content.slice(0, 160);
+      return `- ${date}: ${text}`;
+    }),
+  ].join("\n");
+}
+
+function extractAliasTerms(text: string, limit = 8): string[] {
+  return [...new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9\u4e00-\u9fff]+/u)
+      .map((item) => item.trim())
+      .filter((item) => item.length >= 4),
+  )].slice(0, limit);
+}
+
 export async function createMemoryStore(config: MemoryStoreConfig): Promise<MemoryStore> {
   const collection = config.collection ?? DEFAULT_COLLECTION;
   const scope = config.scope;
+  const hybridEnabled = config.hybridEnabled ?? true;
+  const hybridScanLimit = config.hybridScanLimit ?? 250;
+  const hybridLexicalWeight = config.hybridLexicalWeight ?? 0.7;
+  const hybridSemanticWeight = config.hybridSemanticWeight ?? 0.3;
+  const preconsciousPolicy: PreconsciousPolicyConfig = {
+    ...DEFAULT_PRECONSCIOUS_POLICY,
+    ...(config.preconsciousPolicy ?? {}),
+    categoryBoosts: {
+      ...DEFAULT_PRECONSCIOUS_POLICY.categoryBoosts,
+      ...(config.preconsciousPolicy?.categoryBoosts ?? {}),
+    },
+  };
+  const resolvedPolicyDefaults = { ...CATEGORY_POLICIES.default, ...(config.compactPolicy ?? {}) };
+  const resolvedCategoryPolicies = new Map<string, CompactPolicyConfig>();
   let db: Database;
+
+  for (const [category, policy] of Object.entries(CATEGORY_POLICIES)) {
+    resolvedCategoryPolicies.set(category, { ...resolvedPolicyDefaults, ...policy });
+  }
+  for (const [category, overrides] of Object.entries(config.compactCategoryPolicies ?? {})) {
+    const existing = resolvedCategoryPolicies.get(category) ?? resolvedPolicyDefaults;
+    resolvedCategoryPolicies.set(category, { ...existing, ...(overrides ?? {}) });
+  }
 
   async function initDb(): Promise<void> {
     db = await openDatabase(resolveDbPath(config));
@@ -78,143 +317,44 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     mkdirSync(config.memoryDir, { recursive: true });
   }
 
-  async function write(
+  function memoryFilePath(id: string): string {
+    return path.join(config.memoryDir, `${id}.md`);
+  }
+
+  function pendingSessionPath(): string {
+    return path.join(config.memoryDir, PENDING_SESSION_FILE);
+  }
+
+  function buildAliases(
     content: string,
     category?: string,
     tags?: string[],
+    aliases?: string[],
     title?: string,
-  ): Promise<MemoryEntry> {
-    // 去重检查
-    const existingResults = searchMemories(content, 3, 0.5);
-    const matches: ExistingMatch[] = existingResults.map((r) => ({
-      id: r.id,
-      content: r.content,
-      category: r.category,
-      score: r.score,
-    }));
-
-    const dedup = getDedupeDecision(content, category, matches);
-
-    if (dedup.decision === "skip") {
-      // 返回已有记忆
-      const existing = await get(dedup.matchId!);
-      if (existing) return existing;
+    abstract?: string,
+    summary?: string,
+  ): string[] {
+    const derived = new Set<string>();
+    if (category) derived.add(category);
+    for (const tag of tags ?? []) derived.add(tag);
+    for (const alias of aliases ?? []) {
+      const normalized = alias.trim();
+      if (normalized) derived.add(normalized);
     }
-
-    if (dedup.decision === "update" && dedup.matchId) {
-      // 更新已有记忆
-      const existingDoc = findDocumentByPath(db, collection, dedup.matchId);
-      if (existingDoc) {
-        const now = new Date().toISOString();
-        const newHash = hashContent(content);
-        const newAbstract = generateAbstract(content);
-        const newSummary = generateSummary(content);
-
-        insertContent(db, newHash, buildFullContent(content, category, tags), now);
-        updateDocument(db, existingDoc.id, {
-          hash: newHash,
-          title: title ?? content.slice(0, 80),
-          category,
-          abstract: newAbstract,
-          summary: newSummary,
-          modifiedAt: now,
-        });
-
-        const entry: MemoryEntry = {
-          id: dedup.matchId,
-          content,
-          category,
-          tags,
-          created: existingDoc.createdAt,
-          abstract: newAbstract,
-          summary: newSummary,
-          scope,
-        };
-        // 更新 md 文件
-        const filePath = path.join(config.memoryDir, `${dedup.matchId}.md`);
-        writeFileSync(filePath, formatMemoryFile(entry), "utf-8");
-        return entry;
-      }
-    }
-
-    if (dedup.decision === "merge" && dedup.matchId) {
-      // 合并内容
-      const existingDoc = findDocumentByPath(db, collection, dedup.matchId);
-      if (existingDoc) {
-        const existingContent = getDocContent(existingDoc.hash);
-        if (existingContent) {
-          const merged = mergeContents(existingContent, content);
-          const now = new Date().toISOString();
-          const newHash = hashContent(merged);
-          const newAbstract = generateAbstract(merged);
-          const newSummary = generateSummary(merged);
-
-          insertContent(db, newHash, buildFullContent(merged, category ?? existingDoc.category ?? undefined, tags), now);
-          updateDocument(db, existingDoc.id, {
-            hash: newHash,
-            title: title ?? merged.slice(0, 80),
-            abstract: newAbstract,
-            summary: newSummary,
-            modifiedAt: now,
-          });
-
-          const entry: MemoryEntry = {
-            id: dedup.matchId,
-            content: merged,
-            category: category ?? existingDoc.category ?? undefined,
-            tags,
-            created: existingDoc.createdAt,
-            abstract: newAbstract,
-            summary: newSummary,
-            scope,
-          };
-          const filePath = path.join(config.memoryDir, `${dedup.matchId}.md`);
-          writeFileSync(filePath, formatMemoryFile(entry), "utf-8");
-          return entry;
-        }
-      }
-    }
-
-    // CREATE 新记忆
-    const id = generateMemoryId(content, title);
-    const created = new Date().toISOString();
-    const abstract = generateAbstract(content);
-    const summary = generateSummary(content);
-    const entry: MemoryEntry = {
-      id,
-      content,
-      category,
-      tags,
-      created,
-      abstract,
-      summary,
-      scope,
-    };
-
-    // 写 markdown 文件
-    const filePath = path.join(config.memoryDir, `${id}.md`);
-    writeFileSync(filePath, formatMemoryFile(entry), "utf-8");
-
-    // 写入 SQLite FTS 索引
-    const fullContent = buildFullContent(content, category, tags);
-    const hash = hashContent(fullContent);
-    const docTitle = title ?? content.slice(0, 80);
-
-    insertContent(db, hash, fullContent, created);
-    insertDocumentExtended(db, collection, id, docTitle, hash, created, created, {
-      category,
-      abstract,
-      summary,
-      scope,
-    });
-
-    return entry;
+    const firstSentence = content.split(/[\r\n。！？!?]/)[0]?.trim();
+    if (firstSentence && firstSentence.length <= 80) derived.add(firstSentence);
+    for (const term of extractAliasTerms(title ?? "")) derived.add(term);
+    for (const term of extractAliasTerms(firstSentence ?? "")) derived.add(term);
+    for (const term of extractAliasTerms(abstract ?? "")) derived.add(term);
+    for (const term of extractAliasTerms(summary ?? "")) derived.add(term);
+    return [...derived];
   }
 
-  function buildFullContent(content: string, category?: string, tags?: string[]): string {
+  function buildFullContent(content: string, category?: string, tags?: string[], aliases?: string[]): string {
     return [
       category ? `[${category}]` : "",
       tags?.length ? `tags: ${tags.join(" ")}` : "",
+      aliases?.length ? `aliases: ${aliases.join(" | ")}` : "",
       content,
     ]
       .filter(Boolean)
@@ -222,44 +362,325 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   function getDocContent(hash: string): string | null {
-    const row = db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(hash) as
-      | { doc: string }
-      | undefined;
+    const row = db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(hash) as { doc: string } | undefined;
     return row?.doc ?? null;
   }
 
-  function searchMemories(
+  function writeEntryFile(entry: MemoryEntry): void {
+    writeFileSync(memoryFilePath(entry.id), formatMemoryFile(entry), "utf-8");
+  }
+
+  function rowToMemory(row: FTSResultExtended | DocumentScanRow, score: number): RecalledMemory {
+    return {
+      id: row.id,
+      content: row.content,
+      title: row.title,
+      category: row.category ?? undefined,
+      score,
+      docId: row.docId,
+      accessCount: row.accessCount,
+      lastAccessedAt: row.lastAccessedAt ?? undefined,
+      abstract: row.abstract ?? undefined,
+      summary: row.summary ?? undefined,
+      created: row.createdAt,
+      importance: row.importance,
+      confidence: row.confidence,
+      sourceType: row.sourceType,
+      stage: row.stage as "memory" | "observation",
+      expiresAt: row.expiresAt ?? undefined,
+      archived: Boolean(row.archived),
+      aliases: row.aliases ? row.aliases.split("|").map((item) => item.trim()).filter(Boolean) : undefined,
+    };
+  }
+
+  async function syncEntryFileFromDb(id: string): Promise<void> {
+    const entry = await get(id);
+    if (!entry) return;
+    writeEntryFile(entry);
+  }
+
+  async function recordAccess(ids: string[]): Promise<void> {
+    for (const id of ids) {
+      const doc = findDocumentByPath(db, collection, id);
+      if (!doc) continue;
+      updateAccessCount(db, doc.id);
+    }
+  }
+
+  function searchStage(
     query: string,
     limit: number,
     minScore: number,
+    stage: "memory" | "observation",
+    archivedFilter: "active" | "archived" | "all" = "active",
   ): RecalledMemory[] {
-    const results = searchFTSExtended(db, query, limit, collection, scope);
+    const lexicalResults = searchFTSExtended(db, query, Math.max(limit * 3, 10), collection, scope, stage, archivedFilter)
+      .filter((item) => item.stage === stage);
+    if (!hybridEnabled || hybridScanLimit <= 0) {
+      return lexicalResults
+        .filter((hit) => hit.score >= minScore)
+        .slice(0, limit)
+        .map((hit) => rowToMemory(hit, hit.score));
+    }
 
-    return results
+    const semanticCandidates = scanDocumentsExtended(db, hybridScanLimit, collection, scope, stage, archivedFilter);
+    const semanticResults = rankSemanticMatches(
+      query,
+      semanticCandidates.map((item) => ({
+        id: item.id,
+        title: item.title,
+        content: item.content,
+        abstract: item.abstract ?? undefined,
+        summary: item.summary ?? undefined,
+      })),
+      Math.max(limit * 3, 10),
+    );
+    const fused = fuseRankedResults(
+      lexicalResults.map((hit) => ({ id: hit.id, score: hit.score })),
+      semanticResults,
+      Math.max(limit * 3, 10),
+      hybridLexicalWeight,
+      hybridSemanticWeight,
+    );
+
+    const lexicalMap = new Map(lexicalResults.map((item) => [item.id, item]));
+    const candidateMap = new Map(semanticCandidates.map((item) => [item.id, item]));
+
+    return fused
+      .map((item) => {
+        const lexical = lexicalMap.get(item.id);
+        if (lexical) return rowToMemory(lexical, item.score);
+        const semantic = candidateMap.get(item.id);
+        return semantic ? rowToMemory(semantic, item.score) : null;
+      })
+      .filter((hit): hit is RecalledMemory => hit !== null)
       .filter((hit) => hit.score >= minScore)
-      .map((hit: FTSResultExtended) => ({
-        id: hit.id,
-        content: hit.content,
-        category: hit.category ?? undefined,
-        score: hit.score,
-        docId: hit.docId,
-        accessCount: hit.accessCount,
-        lastAccessedAt: hit.lastAccessedAt ?? undefined,
-        abstract: hit.abstract ?? undefined,
-        summary: hit.summary ?? undefined,
-        created: hit.createdAt,
+      .slice(0, limit);
+  }
+
+  async function storeEntry(
+    content: string,
+    category?: string,
+    tags?: string[],
+    title?: string,
+    options: MemoryWriteOptions = {},
+  ): Promise<MemoryEntry> {
+    const stage = options.stage ?? "memory";
+    const importance = clamp01(options.importance, stage === "observation" ? 0.45 : 0.7);
+    const confidence = clamp01(options.confidence, stage === "observation" ? 0.55 : 1);
+    const sourceType = options.sourceType ?? (stage === "observation" ? "capture" : "manual");
+    const abstract = generateAbstract(content);
+    const summary = generateSummary(content);
+    const aliases = buildAliases(content, category, tags, options.aliases, title, abstract, summary);
+
+    if (stage === "memory" && !options.skipDedupe) {
+      const existingResults = searchStage(content, 3, 0.5, "memory");
+      const matches: ExistingMatch[] = existingResults.map((r) => ({
+        id: r.id,
+        content: r.content,
+        category: r.category,
+        score: r.score,
       }));
+      const dedup = getDedupeDecision(content, category, matches);
+      if (dedup.decision === "skip") {
+        const existing = await get(dedup.matchId!);
+        if (existing) return existing;
+      }
+
+      if ((dedup.decision === "update" || dedup.decision === "merge") && dedup.matchId) {
+        const existingDoc = findDocumentByPath(db, collection, dedup.matchId);
+        if (existingDoc) {
+          const existingContent = getDocContent(existingDoc.hash);
+          const nextContent = dedup.decision === "merge" && existingContent
+            ? mergeContents(existingContent, content)
+            : content;
+          const now = new Date().toISOString();
+          const abstract = generateAbstract(nextContent);
+          const summary = generateSummary(nextContent);
+          const mergedAliases = buildAliases(
+            nextContent,
+            category ?? existingDoc.category ?? undefined,
+            tags,
+            options.aliases,
+            title ?? existingDoc.title ?? undefined,
+            abstract,
+            summary,
+          );
+          const fullContent = buildFullContent(nextContent, category ?? existingDoc.category ?? undefined, tags, mergedAliases);
+          const newHash = hashContent(fullContent);
+
+          insertContent(db, newHash, fullContent, now);
+          updateDocument(db, existingDoc.id, {
+            hash: newHash,
+            title: title ?? nextContent.slice(0, 80),
+            category: category ?? existingDoc.category ?? undefined,
+            importance: Math.max(existingDoc.importance, importance),
+            confidence: Math.max(existingDoc.confidence, confidence),
+            abstract,
+            summary,
+            scope,
+            sourceType,
+            stage: "memory",
+            expiresAt: options.expiresAt ?? existingDoc.expiresAt,
+            aliases: mergedAliases.join("|"),
+            modifiedAt: now,
+          });
+
+          const updated: MemoryEntry = {
+            id: dedup.matchId,
+            content: nextContent,
+            title: title ?? existingDoc.title,
+            category: category ?? existingDoc.category ?? undefined,
+            tags,
+            created: existingDoc.createdAt,
+            importance: Math.max(existingDoc.importance, importance),
+            confidence: Math.max(existingDoc.confidence, confidence),
+            abstract,
+            summary,
+            scope,
+            sourceType,
+            stage: "memory",
+            expiresAt: options.expiresAt ?? existingDoc.expiresAt ?? undefined,
+            aliases: mergedAliases,
+          };
+          writeEntryFile(updated);
+          return updated;
+        }
+      }
+    }
+
+    const id = generateMemoryId(content, title);
+    const created = new Date().toISOString();
+    const docTitle = title ?? content.slice(0, 80);
+    const entry: MemoryEntry = {
+      id,
+      content,
+      title: docTitle,
+      category,
+      tags,
+      created,
+      importance,
+      confidence,
+      abstract,
+      summary,
+      scope,
+      sourceType,
+      stage,
+      expiresAt: options.expiresAt,
+      aliases,
+    };
+
+    writeEntryFile(entry);
+
+    const fullContent = buildFullContent(content, category, tags, aliases);
+    const hash = hashContent(fullContent);
+    insertContent(db, hash, fullContent, created);
+    insertDocumentExtended(db, collection, id, docTitle, hash, created, created, {
+      category,
+      importance,
+      abstract,
+      summary,
+      scope,
+      confidence,
+      sourceType,
+      stage,
+      expiresAt: options.expiresAt ?? null,
+      aliases: aliases.join("|"),
+    });
+
+    return entry;
+  }
+
+  async function write(
+    content: string,
+    category?: string,
+    tags?: string[],
+    title?: string,
+    options: MemoryWriteOptions = {},
+  ): Promise<MemoryEntry> {
+    return storeEntry(content, category, tags, title, { ...options, stage: "memory" });
+  }
+
+  async function writeObservation(
+    content: string,
+    category?: string,
+    tags?: string[],
+    title?: string,
+    options: MemoryWriteOptions = {},
+  ): Promise<MemoryEntry> {
+    const existing = searchStage(content, 1, 0.95, "observation")[0];
+    if (existing?.id) {
+      const current = await get(existing.id);
+      const doc = findDocumentByPath(db, collection, existing.id);
+      if (current && doc) {
+        const nextConfidence = Math.max(current.confidence ?? 0.55, options.confidence ?? 0.55);
+        const nextImportance = Math.max(current.importance ?? 0.45, options.importance ?? 0.45);
+        updateDocument(db, doc.id, {
+          confidence: nextConfidence,
+          importance: nextImportance,
+          modifiedAt: new Date().toISOString(),
+        });
+        const updated: MemoryEntry = {
+          ...current,
+          confidence: nextConfidence,
+          importance: nextImportance,
+        };
+        writeEntryFile(updated);
+        return updated;
+      }
+    }
+    return storeEntry(content, category, tags, title, {
+      ...options,
+      stage: "observation",
+      sourceType: options.sourceType ?? "capture",
+      confidence: options.confidence ?? 0.55,
+      importance: options.importance ?? 0.45,
+      skipDedupe: true,
+    });
   }
 
   async function get(id: string): Promise<MemoryEntry | null> {
-    const filePath = path.join(config.memoryDir, `${id}.md`);
-    if (!existsSync(filePath)) return null;
-    try {
-      const raw = readFileSync(filePath, "utf-8");
-      return parseMemoryFile(raw);
-    } catch {
-      return null;
+    const filePath = memoryFilePath(id);
+    const doc = findDocumentByPath(db, collection, id);
+    const fileEntry = existsSync(filePath)
+      ? (() => {
+        try {
+          return parseMemoryFile(readFileSync(filePath, "utf-8"));
+        } catch {
+          return null;
+        }
+      })()
+      : null;
+
+    if (!doc) {
+      return fileEntry;
     }
+
+    const stored = getDocContent(doc.hash);
+    const parsedStored = stored ? parseStoredDocumentContent(stored) : null;
+
+    return {
+      id,
+      content: parsedStored?.content ?? fileEntry?.content ?? "",
+      title: doc.title ?? fileEntry?.title,
+      category: doc.category ?? fileEntry?.category,
+      tags: fileEntry?.tags ?? parsedStored?.tags,
+      created: doc.createdAt,
+      importance: doc.importance,
+      confidence: doc.confidence,
+      accessCount: doc.accessCount,
+      abstract: doc.abstract ?? fileEntry?.abstract,
+      summary: doc.summary ?? fileEntry?.summary,
+      scope: doc.scope ?? fileEntry?.scope,
+      sourceType: doc.sourceType ?? fileEntry?.sourceType,
+      stage: (doc.stage as "memory" | "observation") ?? fileEntry?.stage,
+      expiresAt: doc.expiresAt ?? fileEntry?.expiresAt,
+      archived: Boolean(doc.archived),
+      lastAccessedAt: doc.lastAccessedAt ?? fileEntry?.lastAccessedAt,
+      aliases: (doc.aliases ? doc.aliases.split("|").map((item) => item.trim()).filter(Boolean) : undefined)
+        ?? fileEntry?.aliases
+        ?? parsedStored?.aliases,
+    };
   }
 
   async function deleteMemory(id: string): Promise<boolean> {
@@ -267,7 +688,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     if (doc) {
       deleteDocument(db, doc.id);
     }
-    const filePath = path.join(config.memoryDir, `${id}.md`);
+    const filePath = memoryFilePath(id);
     if (existsSync(filePath)) {
       unlinkSync(filePath);
       return true;
@@ -276,35 +697,415 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function reindex(): Promise<void> {
-    // SQLite FTS 索引在写入时自动更新，无需手动 reindex
+    // SQLite FTS is trigger-backed; nothing to do.
+  }
+
+  async function getStats(): Promise<MemoryStats> {
+    type Row = {
+      category: string | null;
+      stage: string;
+      sourceType: string;
+      archived: number;
+      expiresAt: string | null;
+      total: number;
+    };
+
+    const rows = db.prepare(
+      `SELECT
+         category,
+         stage,
+         source_type as sourceType,
+         archived,
+         expires_at as expiresAt,
+         COUNT(*) as total
+       FROM documents
+       WHERE collection = ? AND active = 1
+       GROUP BY category, stage, source_type, archived, expires_at`,
+    ).all(collection) as Row[];
+
+    const stats: MemoryStats = {
+      total: 0,
+      active: 0,
+      archived: 0,
+      memory: 0,
+      observations: 0,
+      expiredActive: 0,
+      categories: {},
+      stages: {},
+      sourceTypes: {},
+    };
+    const now = Date.now();
+
+    for (const row of rows) {
+      const count = Number(row.total) || 0;
+      const category = row.category ?? "uncategorized";
+      const bucket = stats.categories[category] ?? {
+        total: 0,
+        active: 0,
+        archived: 0,
+        memory: 0,
+        observations: 0,
+      };
+
+      stats.total += count;
+      bucket.total += count;
+
+      if (row.archived) {
+        stats.archived += count;
+        bucket.archived += count;
+      } else {
+        stats.active += count;
+        bucket.active += count;
+        if (row.expiresAt && new Date(row.expiresAt).getTime() <= now) {
+          stats.expiredActive += count;
+        }
+      }
+
+      if (row.stage === "observation") {
+        stats.observations += count;
+        bucket.observations += count;
+      } else {
+        stats.memory += count;
+        bucket.memory += count;
+      }
+
+      stats.categories[category] = bucket;
+      stats.stages[row.stage] = (stats.stages[row.stage] ?? 0) + count;
+      stats.sourceTypes[row.sourceType] = (stats.sourceTypes[row.sourceType] ?? 0) + count;
+    }
+
+    return stats;
+  }
+
+  async function listObservations(limit: number, minConfidence = 0): Promise<RecalledMemory[]> {
+    return scanDocumentsExtended(db, Math.max(limit, 1), collection, scope, "observation")
+      .filter((item) => item.confidence >= minConfidence)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit)
+      .map((item) => rowToMemory(item, item.confidence));
+  }
+
+  async function reviewObservation(
+    id: string,
+    action: "promote" | "drop" | "archive",
+  ): Promise<{ action: string; reviewed: boolean; promotedId?: string }> {
+    const doc = findDocumentByPath(db, collection, id);
+    if (!doc || doc.stage !== "observation" || doc.archived) {
+      return { action, reviewed: false };
+    }
+
+    if (action === "drop") {
+      const deleted = await deleteMemory(id);
+      return { action, reviewed: deleted };
+    }
+
+    if (action === "archive") {
+      updateDocument(db, doc.id, {
+        archived: 1,
+        modifiedAt: new Date().toISOString(),
+      });
+      await syncEntryFileFromDb(id);
+      return { action, reviewed: true };
+    }
+
+    const entry = await get(id);
+    if (!entry) {
+      return { action, reviewed: false };
+    }
+
+    const promoted = await write(
+      entry.content,
+      entry.category,
+      entry.tags,
+      doc.title,
+      {
+        importance: entry.importance,
+        confidence: entry.confidence,
+        sourceType: entry.sourceType,
+        expiresAt: entry.expiresAt,
+        aliases: entry.aliases,
+      },
+    );
+    updateDocument(db, doc.id, {
+      archived: 1,
+      modifiedAt: new Date().toISOString(),
+    });
+    await syncEntryFileFromDb(id);
+    return { action, reviewed: true, promotedId: promoted.id };
+  }
+
+  async function compact(): Promise<CompactReport> {
+    const observations = scanDocumentsExtended(db, 500, collection, scope, "observation");
+    const groups = new Map<string, DocumentScanRow[]>();
+    for (const item of observations) {
+      const key = normalizeKey(item.content);
+      const bucket = groups.get(key) ?? [];
+      bucket.push(item);
+      groups.set(key, bucket);
+    }
+
+    let promoted = 0;
+    let archived = 0;
+    let skipped = 0;
+    let summarized = 0;
+    const promotedIds: string[] = [];
+    const archivedIds: string[] = [];
+    const skippedIds: string[] = [];
+    const summarizedIds: string[] = [];
+    const actions: CompactReport["actions"] = [];
+    const now = new Date().toISOString();
+
+    for (const items of groups.values()) {
+      const latest = [...items].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      const maxConfidence = Math.max(...items.map((item) => item.confidence));
+      const maxImportance = Math.max(...items.map((item) => item.importance));
+      const policy = resolvedCategoryPolicies.get(latest.category ?? "") ?? resolvedCategoryPolicies.get("default")!;
+      const shouldPromote =
+        items.length >= policy.promoteOccurrences ||
+        maxConfidence >= policy.promoteConfidence ||
+        maxImportance >= policy.promoteImportance;
+
+      if (shouldPromote) {
+        const promotedEntry = await write(
+          latest.content,
+          latest.category ?? undefined,
+          undefined,
+          latest.title,
+          {
+            confidence: maxConfidence,
+            importance: maxImportance,
+            sourceType: latest.sourceType,
+            aliases: latest.aliases ? latest.aliases.split("|").filter(Boolean) : undefined,
+          },
+        );
+        promoted += 1;
+        promotedIds.push(promotedEntry.id);
+        actions.push({
+          action: "promote",
+          id: promotedEntry.id,
+          reason: `observation matched compact policy: occurrences=${items.length}, confidence=${maxConfidence.toFixed(2)}, importance=${maxImportance.toFixed(2)}`,
+          stage: "observation",
+          category: latest.category ?? undefined,
+        });
+        for (const item of items) {
+          const doc = findDocumentByPath(db, collection, item.id);
+          if (doc) {
+            updateDocument(db, doc.id, {
+              archived: 1,
+              modifiedAt: now,
+            });
+            await syncEntryFileFromDb(item.id);
+            archived += 1;
+            archivedIds.push(item.id);
+            actions.push({
+              action: "archive",
+              id: item.id,
+              reason: `observation archived after promotion into ${promotedEntry.id}`,
+              stage: "observation",
+              category: item.category ?? undefined,
+            });
+          }
+        }
+      } else {
+        skipped += items.length;
+        skippedIds.push(...items.map((item) => item.id));
+        for (const item of items) {
+          actions.push({
+            action: "skip",
+            id: item.id,
+            reason: `observation below compact thresholds: occurrences=${items.length}, confidence=${maxConfidence.toFixed(2)}, importance=${maxImportance.toFixed(2)}`,
+            stage: "observation",
+            category: item.category ?? undefined,
+          });
+        }
+      }
+    }
+
+    const memoryItems = scanDocumentsExtended(db, 500, collection, scope, "memory");
+    const archiveCandidatesByCategory = new Map<string, DocumentScanRow[]>();
+    for (const item of memoryItems) {
+      const policy = resolvedCategoryPolicies.get(item.category ?? "") ?? resolvedCategoryPolicies.get("default")!;
+      const expired = item.expiresAt ? new Date(item.expiresAt).getTime() <= Date.now() : false;
+      const stale = daysBetween(item.createdAt, now) > policy.archiveAfterDays && (item.importance ?? 0.5) < 0.75;
+      if (!expired && !stale) continue;
+      const key = item.category ?? "default";
+      const bucket = archiveCandidatesByCategory.get(key) ?? [];
+      bucket.push(item);
+      archiveCandidatesByCategory.set(key, bucket);
+    }
+
+    for (const [category, items] of archiveCandidatesByCategory.entries()) {
+      const policy = resolvedCategoryPolicies.get(category) ?? resolvedCategoryPolicies.get("default")!;
+      if (policy.summarizeBeforeArchive && items.length >= 2) {
+        const summaryContent = summarizeCluster(items);
+        const summaryEntry = await write(
+          summaryContent,
+          category === "event" ? "pattern" : category,
+          ["compaction", "summary"],
+          `compact-${category}-summary`,
+          {
+            importance: 0.78,
+            confidence: 0.82,
+            sourceType: "compaction",
+            aliases: [category, "summary", "archive"],
+            skipDedupe: true,
+          },
+        );
+        summarized += 1;
+        summarizedIds.push(summaryEntry.id);
+        actions.push({
+          action: "summarize",
+          id: summaryEntry.id,
+          reason: `created compaction summary for ${items.length} ${category} items before archiving`,
+          stage: "memory",
+          category,
+        });
+      }
+
+      for (const item of items) {
+        const doc = findDocumentByPath(db, collection, item.id);
+        if (!doc) continue;
+        updateDocument(db, doc.id, {
+          archived: 1,
+          modifiedAt: now,
+        });
+        await syncEntryFileFromDb(item.id);
+        archived += 1;
+        archivedIds.push(item.id);
+        actions.push({
+          action: "archive",
+          id: item.id,
+          reason: item.expiresAt && new Date(item.expiresAt).getTime() <= Date.now()
+            ? "memory expired"
+            : "memory became stale under compact policy",
+          stage: "memory",
+          category: item.category ?? undefined,
+        });
+      }
+    }
+
+    return { promoted, archived, skipped, summarized, promotedIds, archivedIds, skippedIds, summarizedIds, actions };
+  }
+
+  async function buildPreconscious(limit: number): Promise<PreconsciousItem[]> {
+    const candidates = scanDocumentsExtended(db, Math.max(limit * 6, 20), collection, scope, "memory");
+    const ranked = candidates
+      .filter((item) => !item.expiresAt || new Date(item.expiresAt).getTime() > Date.now())
+      .filter((item) => daysBetween(item.createdAt) <= preconsciousPolicy.maxAgeDays)
+      .map((item) => {
+        const recencyBoost = Math.max(0, 1 - (daysBetween(item.createdAt) / Math.max(preconsciousPolicy.maxAgeDays, 1)));
+        const categoryBoost = preconsciousPolicy.categoryBoosts[item.category ?? ""] ?? 0;
+        const score =
+          (item.importance * preconsciousPolicy.importanceWeight) +
+          (item.confidence * preconsciousPolicy.confidenceWeight) +
+          (recencyBoost * preconsciousPolicy.recencyWeight) +
+          categoryBoost;
+        return {
+          id: item.id,
+          content: item.content,
+          category: item.category ?? undefined,
+          score,
+          abstract: item.abstract ?? undefined,
+          summary: item.summary ?? undefined,
+          created: item.createdAt,
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+    return ranked;
+  }
+
+  async function persistPendingSession(payload: PendingSessionPayload): Promise<void> {
+    writeFileSync(pendingSessionPath(), JSON.stringify(payload, null, 2), "utf-8");
+  }
+
+  async function clearPendingSession(): Promise<void> {
+    const filePath = pendingSessionPath();
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  }
+
+  async function recoverPendingSession(): Promise<number> {
+    const filePath = pendingSessionPath();
+    if (!existsSync(filePath)) return 0;
+    let parsed: PendingSessionPayload | null = null;
+    try {
+      parsed = JSON.parse(readFileSync(filePath, "utf-8")) as PendingSessionPayload;
+    } catch {
+      unlinkSync(filePath);
+      return 0;
+    }
+
+    let recovered = 0;
+    const existingNormalized = new Set<string>([
+      ...scanDocumentsExtended(db, 1000, collection, scope, "observation").map((item) => normalizeStoredContent(item.content)),
+      ...scanDocumentsExtended(db, 1000, collection, scope, "memory").map((item) => normalizeStoredContent(item.content)),
+    ]);
+    for (const entry of parsed.entries ?? []) {
+      const normalized = normalizeKey(entry.content);
+      if (existingNormalized.has(normalized)) continue;
+      await writeObservation(entry.content, entry.category, entry.tags, entry.title, {
+        confidence: entry.confidence ?? 0.55,
+        importance: entry.importance ?? 0.45,
+        sourceType: "recovery",
+      });
+      existingNormalized.add(normalized);
+      recovered += 1;
+    }
+
+    unlinkSync(filePath);
+    return recovered;
   }
 
   let closed = false;
   function close(): void {
     if (closed) return;
     closed = true;
-    process.removeListener("exit", close);
+    processClosers.delete(close);
     try {
       db?.close();
     } catch {
-      // 忽略关闭错误
+      // ignore close errors
     }
   }
 
-  // 初始化
   ensureCollection();
   await initDb();
-
-  // 进程退出时自动关闭数据库
-  process.on("exit", close);
+  installProcessExitHook();
+  processClosers.add(close);
 
   return {
     write,
-    search: (q, l, m) => Promise.resolve(searchMemories(q, l, m)),
+    writeObservation,
+    search: (q, l, m) => Promise.resolve(searchStage(q, l, m, "memory")),
+    searchWithArchived: async (q, l, m) => {
+      const active = searchStage(q, Math.max(l * 2, 10), m, "memory", "active");
+      const archivedResults = searchStage(q, Math.max(l * 2, 10), m, "memory", "archived")
+        .map((item) => ({ ...item, score: item.score * 0.82 }));
+      const merged = [...active];
+      const seen = new Set(active.map((item) => item.id));
+      for (const item of archivedResults) {
+        if (!seen.has(item.id)) merged.push(item);
+      }
+      return merged
+        .sort((a, b) => b.score - a.score)
+        .slice(0, l);
+    },
+    searchArchived: (q, l, m) => Promise.resolve(searchStage(q, l, m, "memory", "archived")),
+    listObservations,
+    reviewObservation,
     get,
+    getStats,
     delete: deleteMemory,
     ensureCollection,
     reindex,
+    compact,
+    buildPreconscious,
+    persistPendingSession,
+    clearPendingSession,
+    recoverPendingSession,
+    recordAccess,
     close,
   };
 }

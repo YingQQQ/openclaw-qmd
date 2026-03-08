@@ -72,6 +72,21 @@ describe("createQmdReader", () => {
 
       reader.close();
     });
+
+    it("finds synonym-like matches through hybrid retrieval", async () => {
+      const dir = createTempDir();
+      const { dbPath, db } = await createTestDb(dir);
+
+      insertTestDoc(db, "notes", "family.md", "Family Plan", "She wants to help kids and build a family.");
+
+      const reader = await createQmdReader({ dbPath });
+      const results = reader.query("children family", 5);
+
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0]!.content).toContain("kids");
+
+      reader.close();
+    });
   });
 
   describe("findDocument", () => {

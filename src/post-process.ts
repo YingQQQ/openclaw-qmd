@@ -11,6 +11,10 @@ export type ScoredResult = {
   created?: string;
   accessCount?: number;
   lastAccessedAt?: string;
+  importance?: number;
+  confidence?: number;
+  sourceType?: string;
+  expiresAt?: string;
 };
 
 export type PostProcessOptions = {
@@ -22,6 +26,11 @@ export type PostProcessOptions = {
   minScore?: number;
   mmrLambda?: number;
   mmrEnabled?: boolean;
+  importanceWeight?: number;
+  confidenceWeight?: number;
+  expiryPenalty?: number;
+  accessWeight?: number;
+  accessRecencyHalfLifeDays?: number;
 };
 
 const DEFAULT_CATEGORY_WEIGHTS: Record<string, number> = {
@@ -104,6 +113,60 @@ export function hardMinScoreFilter(
   minScore: number,
 ): ScoredResult[] {
   return results.filter((r) => r.score >= minScore);
+}
+
+export function applyImportanceBoost(
+  results: ScoredResult[],
+  weight = 0.2,
+): ScoredResult[] {
+  return results.map((r) => {
+    const importance = Math.max(0, Math.min(1, r.importance ?? 0.5));
+    return { ...r, score: r.score * (1 + importance * weight) };
+  });
+}
+
+export function applyConfidenceBoost(
+  results: ScoredResult[],
+  weight = 0.15,
+): ScoredResult[] {
+  return results.map((r) => {
+    const confidence = Math.max(0, Math.min(1, r.confidence ?? 1));
+    const sourcePenalty = r.sourceType === "recovery" ? 0.97 : 1;
+    return { ...r, score: r.score * (1 + confidence * weight) * sourcePenalty };
+  });
+}
+
+export function applyExpiryPenalty(
+  results: ScoredResult[],
+  penalty = 0.3,
+): ScoredResult[] {
+  return results
+    .filter((r) => {
+      if (!r.expiresAt) return true;
+      return new Date(r.expiresAt).getTime() > Date.now();
+    })
+    .map((r) => {
+      if (!r.expiresAt) return { ...r };
+      const daysLeft = (new Date(r.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+      const nearExpiryFactor = daysLeft <= 1 ? 1 + penalty : 1;
+      return { ...r, score: r.score * nearExpiryFactor };
+    });
+}
+
+export function applyAccessReinforcement(
+  results: ScoredResult[],
+  weight = 0.12,
+  lastAccessHalfLifeDays = 14,
+): ScoredResult[] {
+  return results.map((r) => {
+    const accessCount = Math.max(0, r.accessCount ?? 0);
+    const cappedAccess = Math.min(12, accessCount);
+    const accessBoost = 1 + cappedAccess * weight * 0.05;
+    const recencyBoost = r.lastAccessedAt
+      ? 1 + (weight * 0.5 * Math.pow(0.5, ageDays(r.lastAccessedAt) / lastAccessHalfLifeDays))
+      : 1;
+    return { ...r, score: r.score * accessBoost * recencyBoost };
+  });
 }
 
 // --- MMR diversity ---
@@ -194,12 +257,21 @@ export function postProcess(
     minScore,
     mmrLambda = 0.7,
     mmrEnabled = true,
+    importanceWeight = 0.2,
+    confidenceWeight = 0.15,
+    expiryPenalty = 0.3,
+    accessWeight = 0.12,
+    accessRecencyHalfLifeDays = 14,
   } = opts;
 
   let processed = applyRecencyBoost(results, recencyBoostMax, recencyHalfLifeDays);
   processed = applyCategoryWeight(processed, categoryWeights);
+  processed = applyImportanceBoost(processed, importanceWeight);
+  processed = applyConfidenceBoost(processed, confidenceWeight);
   processed = applyLengthNormalization(processed, lengthPenaltyThreshold);
   processed = applyTimeDecay(processed, timeDecayHalfLifeDays);
+  processed = applyExpiryPenalty(processed, expiryPenalty);
+  processed = applyAccessReinforcement(processed, accessWeight, accessRecencyHalfLifeDays);
 
   if (minScore !== undefined) {
     processed = hardMinScoreFilter(processed, minScore);

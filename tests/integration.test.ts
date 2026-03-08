@@ -124,8 +124,9 @@ describe("integration: full plugin lifecycle", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.details.length).toBeGreaterThan(0);
-    expect(result.details[0].snippet).toContain("auth");
+    expect(result.details.results.length).toBeGreaterThan(0);
+    expect(result.details.results[0].snippet).toContain("auth");
+    expect(result.details.variants).toContain("auth JWT");
   });
 
   it("qmd_get reads document content with header", async () => {
@@ -181,6 +182,11 @@ describe("integration: full plugin lifecycle", () => {
     expect(tools.has("memory_get")).toBe(true);
     expect(tools.has("memory_write")).toBe(true);
     expect(tools.has("memory_forget")).toBe(true);
+    expect(tools.has("memory_compact")).toBe(true);
+    expect(tools.has("memory_search_archived")).toBe(true);
+    expect(tools.has("memory_stats")).toBe(true);
+    expect(tools.has("memory_observation_list")).toBe(true);
+    expect(tools.has("memory_observation_review")).toBe(true);
   });
 
   it("memory_write + memory_search round-trip works", async () => {
@@ -208,7 +214,257 @@ describe("integration: full plugin lifecycle", () => {
       limit: 5,
       minScore: 0,
     });
-    expect(searchResult.details.length).toBeGreaterThan(0);
-    expect(searchResult.details[0].content).toContain("dark mode");
+    expect(searchResult.details.results.length).toBeGreaterThan(0);
+    expect(searchResult.details.results[0].content).toContain("dark mode");
+    expect(searchResult.details.variants).toContain("dark mode");
+  });
+
+  it("memory_search can include archived results in historical mode", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerPluginAsync({ dbPath, memoryDir });
+
+    const active = await tools.get("memory_write")!.execute("w-hist-active", {
+      content: "Current release history note",
+      category: "case",
+    });
+    const archived = await tools.get("memory_write")!.execute("w-hist-archived", {
+      content: "Legacy release history note",
+      category: "case",
+    });
+
+    const { openDatabase } = await import("../src/qmd-lite.js");
+    const memoryDb = await openDatabase(path.join(memoryDir, "memories.db"));
+    memoryDb.prepare("UPDATE documents SET archived = 1 WHERE path = ?").run(archived.details.id);
+    memoryDb.close();
+
+    const result = await tools.get("memory_search")!.execute("s-historical", {
+      query: "release history",
+      limit: 10,
+      minScore: 0,
+      includeArchived: true,
+    });
+
+    expect(result.details.results.some((item: any) => item.id === active.details.id)).toBe(true);
+    expect(result.details.results.some((item: any) => item.id === archived.details.id)).toBe(true);
+    expect(result.details.results.some((item: any) => item.id === archived.details.id && item.archived === true)).toBe(true);
+  });
+
+  it("memory_search category-aware rerank favors event memories for temporal queries", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerPluginAsync({ dbPath, memoryDir });
+
+    await tools.get("memory_write")!.execute("w-event", {
+      content: "Caroline attended the support group on 7 May 2023.",
+      category: "event",
+      title: "support-group-date",
+    });
+    await tools.get("memory_write")!.execute("w-entity", {
+      content: "Caroline is part of a support group community.",
+      category: "entity",
+      title: "support-group-community",
+    });
+
+    const result = await tools.get("memory_search")!.execute("s-when", {
+      query: "When did Caroline attend the support group?",
+      limit: 5,
+      minScore: 0,
+    });
+
+    expect(result.details.results.length).toBeGreaterThan(0);
+    expect(result.details.results[0].category).toBe("event");
+  });
+
+  it("memory hybrid retrieval can be disabled via config", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerPluginAsync({
+      dbPath,
+      memoryDir,
+      hybridEnabled: false,
+    });
+
+    await tools.get("memory_write")!.execute("w-hybrid-off", {
+      content: "She wants to help kids in need and build a family.",
+      category: "event",
+      title: "kids-family",
+    });
+
+    const result = await tools.get("memory_search")!.execute("s-hybrid-off", {
+      query: "children family",
+      limit: 5,
+      minScore: 0,
+    });
+
+    expect(result.details).toEqual([]);
+  });
+
+  it("memory_stats and memory_search_archived expose archived visibility", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerPluginAsync({ dbPath, memoryDir });
+
+    const writeResult = await tools.get("memory_write")!.execute("w-archived", {
+      content: "Legacy incident note for audit trail",
+      category: "case",
+      title: "legacy-incident",
+    });
+    const entryId = writeResult.details.id as string;
+
+    const { openDatabase } = await import("../src/qmd-lite.js");
+    const memoryDb = await openDatabase(path.join(memoryDir, "memories.db"));
+    memoryDb.prepare("UPDATE documents SET archived = 1 WHERE path = ?").run(entryId);
+    memoryDb.close();
+
+    const archivedResult = await tools.get("memory_search_archived")!.execute("s-archived", {
+      query: "audit trail",
+      limit: 5,
+      minScore: 0,
+    });
+    const statsResult = await tools.get("memory_stats")!.execute("stats-1", {});
+
+    expect(archivedResult.details.results.length).toBeGreaterThan(0);
+    expect(archivedResult.details.results[0].id).toBe(entryId);
+    expect(archivedResult.details.results[0].archived).toBe(true);
+    expect(archivedResult.content[0].text).toContain('"archived": true');
+    expect(statsResult.details.archived).toBeGreaterThan(0);
+    expect(statsResult.details.categories.case.archived).toBeGreaterThan(0);
+  });
+
+  it("memory_get returns current SQLite state after metadata changes", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerPluginAsync({ dbPath, memoryDir });
+
+    const writeResult = await tools.get("memory_write")!.execute("w-get-state", {
+      content: "Important follow-up memory",
+      category: "case",
+      title: "follow-up",
+    });
+    const entryId = writeResult.details.id as string;
+
+    const { openDatabase } = await import("../src/qmd-lite.js");
+    const memoryDb = await openDatabase(path.join(memoryDir, "memories.db"));
+    memoryDb.prepare(
+      "UPDATE documents SET archived = 1, stage = ?, importance = ?, confidence = ? WHERE path = ?",
+    ).run("observation", 0.88, 0.77, entryId);
+    memoryDb.close();
+
+    const getResult = await tools.get("memory_get")!.execute("g-1", { id: entryId });
+
+    expect(getResult.details.archived).toBe(true);
+    expect(getResult.details.stage).toBe("observation");
+    expect(getResult.details.importance).toBe(0.88);
+    expect(getResult.details.confidence).toBe(0.77);
+    expect(getResult.details.content).toBe("Important follow-up memory");
+    expect(getResult.details.accessCount).toBe(1);
+    expect(getResult.details.lastAccessedAt).toBeTruthy();
+  });
+
+  it("preconsciousPolicy.shortlistSize controls the injected shortlist length", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools, hooks } = await registerPluginAsync({
+      dbPath,
+      memoryDir,
+      preconsciousPolicy: {
+        shortlistSize: 2,
+      },
+    });
+
+    await tools.get("memory_write")!.execute("w-pre-1", {
+      content: "Critical release checklist",
+      category: "case",
+      importance: 0.95,
+      confidence: 0.9,
+    });
+    await tools.get("memory_write")!.execute("w-pre-2", {
+      content: "Preferred response style is concise",
+      category: "preference",
+      importance: 0.85,
+      confidence: 0.8,
+    });
+    await tools.get("memory_write")!.execute("w-pre-3", {
+      content: "Background project detail",
+      category: "entity",
+      importance: 0.2,
+      confidence: 0.5,
+    });
+
+    const hook = hooks.get("before_prompt_build")!;
+    const result = await hook({ prompt: "remember my current priorities" });
+
+    expect(result.prependContext).toContain("<preconscious-memory>");
+    expect(result.prependContext.match(/^- \[/gm)?.length).toBe(2);
+  });
+
+  it("observation review tools expose and resolve staged items", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "demo", "a.md", "Alpha", "placeholder");
+
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { hooks, tools } = await registerPluginAsync({ dbPath, memoryDir });
+    const captureHook = hooks.get("agent_end")!;
+
+    await captureHook({
+      success: true,
+      messages: [
+        { role: "user", content: "Remember that we are going to ship next Tuesday" },
+      ],
+    });
+
+    const listResult = await tools.get("memory_observation_list")!.execute("obs-list", { limit: 10 });
+    expect(listResult.details.length).toBeGreaterThan(0);
+    const observationId = listResult.details[0].id as string;
+
+    const reviewResult = await tools.get("memory_observation_review")!.execute("obs-review", {
+      id: observationId,
+      action: "promote",
+    });
+    expect(reviewResult.details.reviewed).toBe(true);
+
+    const memoryResult = await tools.get("memory_search")!.execute("memory-search", {
+      query: "ship next Tuesday",
+      limit: 5,
+      minScore: 0,
+    });
+    expect(memoryResult.details.results.length).toBeGreaterThan(0);
+
+    const emptyList = await tools.get("memory_observation_list")!.execute("obs-list-2", { limit: 10 });
+    expect(emptyList.details).toEqual([]);
   });
 });

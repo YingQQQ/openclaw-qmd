@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-qmd",
+  "name": "qmd",
   "version": "0.1.0",
   "private": true,
   "description": "OpenClaw plugin for querying a local qmd knowledge base (direct SQLite access) with memory backend.",
@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "locomo:eval": "tsx scripts/locomo-eval.ts"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.48",
@@ -20,6 +21,7 @@
     "@types/node": "^24.6.0",
     "@types/picomatch": "^4.0.2",
     "openclaw": "^2026.3.2",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },

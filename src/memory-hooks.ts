@@ -5,6 +5,8 @@ import { postProcess, type ScoredResult } from "./post-process.js";
 import { formatLayeredContext, type LayeredMemory } from "./layered-context.js";
 import { createSessionTracker, quickHash, type SessionTracker } from "./session-tracker.js";
 import { extractReflections } from "./memory-reflection.js";
+import { searchWithQueryVariants } from "./query-rewrite.js";
+import { inferCategoryWeights } from "./query-intent.js";
 import {
   detectErrorFixPattern,
   appendLearning,
@@ -16,6 +18,7 @@ import {
 export type RecallHookConfig = {
   autoRecallLimit: number;
   autoRecallMinScore: number;
+  preconsciousLimit?: number;
   learningsDir?: string;
 };
 
@@ -56,6 +59,11 @@ export function escapeMemoryForPrompt(text: string): string {
   return text.replace(/[&<>"']/g, (char) => PROMPT_ESCAPE_MAP[char] ?? char);
 }
 
+function shouldIncludeArchivedRecall(query: string): boolean {
+  return /\b(history|historical|old|legacy|previously|earlier|before)\b/i.test(query)
+    || /之前|以前|历史|旧的|早先|曾经/.test(query);
+}
+
 // ---------------------------------------------------------------------------
 // Auto-recall hook (before_prompt_build)
 // ---------------------------------------------------------------------------
@@ -80,6 +88,10 @@ function toScoredResults(results: RecalledMemory[]): ScoredResult[] {
     created: r.created,
     accessCount: r.accessCount,
     lastAccessedAt: r.lastAccessedAt,
+    importance: r.importance,
+    confidence: r.confidence,
+    sourceType: r.sourceType,
+    expiresAt: r.expiresAt,
   }));
 }
 
@@ -90,24 +102,39 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     const query = event.prompt?.trim();
     if (!query) return;
 
+    const recovered = await store.recoverPendingSession();
+    if (recovered > 0) {
+      await store.compact();
+    }
+
     // 自适应检索：跳过无意义查询（除非强制触发）
     if (!shouldForceRetrieve(query) && shouldSkipRetrieval(query)) return;
 
-    const rawResults = await store.search(query, config.autoRecallLimit * 2, config.autoRecallMinScore);
-    if (!rawResults.length) return;
+    const preconscious = await store.buildPreconscious(config.preconsciousLimit ?? 3);
+    const includeArchived = shouldIncludeArchivedRecall(query);
+    const searchFn = includeArchived ? store.searchWithArchived : store.search;
+    const candidateLimit = includeArchived ? Math.max(config.autoRecallLimit * 3, 12) : config.autoRecallLimit * 2;
+    const { results: rawResults } = await searchWithQueryVariants(
+      searchFn,
+      query,
+      candidateLimit,
+      config.autoRecallMinScore,
+    );
+    if (!rawResults.length && preconscious.length === 0) return;
 
     // 过滤已召回的记忆
     const unseenResults = session.filterRecalled(rawResults);
-    if (!unseenResults.length) return;
+    if (!unseenResults.length && preconscious.length === 0) return;
 
     // 后处理管道
     const processed = postProcess(toScoredResults(unseenResults), {
       minScore: config.autoRecallMinScore,
+      categoryWeights: inferCategoryWeights(query),
     });
 
     // 取 top N
     const topResults = processed.slice(0, config.autoRecallLimit);
-    if (!topResults.length) return;
+    if (!topResults.length && preconscious.length === 0) return;
 
     // 重建 RecalledMemory（保留 abstract/summary）
     const recalledMap = new Map(unseenResults.map((r) => [r.id, r]));
@@ -123,12 +150,24 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     for (const r of finalResults) {
       session.markRecalled(r.id);
     }
+    await store.recordAccess(finalResults.map((item) => item.id));
 
     // L0/L1/L2 分层格式化
-    const context = formatLayeredContext(toLayeredMemories(finalResults));
-    if (!context) return;
+    const context = finalResults.length > 0 ? formatLayeredContext(toLayeredMemories(finalResults)) : "";
+    const preconsciousBlock = preconscious.length > 0
+      ? [
+          "<preconscious-memory>",
+          "Recent high-importance memories that may matter for the current turn:",
+          ...preconscious.map((item) => `- [${item.category ?? "memory"}] ${escapeMemoryForPrompt(item.abstract ?? item.summary ?? item.content.slice(0, 180))}`),
+          "</preconscious-memory>",
+        ].join("\n")
+      : "";
 
-    const parts: string[] = [context];
+    if (!context && !preconsciousBlock) return;
+
+    const parts: string[] = [];
+    if (preconsciousBlock) parts.push(preconsciousBlock);
+    if (context) parts.push(context);
 
     // 注入 agent learnings
     if (config.learningsDir) {
@@ -206,7 +245,18 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     const toCapture = cleaned.filter((t) => shouldCapture(t, captureMode, captureMaxLength));
     if (!toCapture.length) return;
 
+    await store.persistPendingSession({
+      storedAt: new Date().toISOString(),
+      entries: toCapture.slice(0, 5).map((content) => ({
+        content,
+        category: detectCategory(content),
+        confidence: captureMode === "semantic" ? 0.6 : 0.7,
+        importance: /always|never|important|must|prefer|decided/i.test(content) ? 0.75 : 0.55,
+      })),
+    });
+
     let stored = 0;
+    let reflectionStored = 0;
     for (const text of toCapture.slice(0, 5)) {
       // 会话内去重
       const hash = quickHash(text);
@@ -220,7 +270,11 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
       }
 
       const category = detectCategory(text);
-      await store.write(text, category);
+      await store.writeObservation(text, category, undefined, undefined, {
+        confidence: captureMode === "semantic" ? 0.6 : 0.7,
+        importance: /always|never|important|must|prefer|decided/i.test(text) ? 0.75 : 0.55,
+        sourceType: "capture",
+      });
       session.markCaptured(hash);
       stored++;
     }
@@ -230,7 +284,12 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
       const reflections = extractReflections(event.messages);
       for (const entry of reflections.entries.slice(0, 3)) {
         const cat = entry.type === "user_model" ? "preference" : entry.type === "lesson" ? "case" : "pattern";
-        await store.write(entry.content, cat);
+        await store.writeObservation(entry.content, cat, undefined, undefined, {
+          confidence: entry.confidence,
+          importance: entry.type === "lesson" ? 0.85 : 0.7,
+          sourceType: "reflection",
+        });
+        reflectionStored++;
       }
     }
 
@@ -247,9 +306,11 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
       }
     }
 
-    if (stored > 0) {
+    if (stored > 0 || reflectionStored > 0) {
+      await store.compact();
       await store.reindex();
     }
+    await store.clearPendingSession();
   };
 }
 

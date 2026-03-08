@@ -3,6 +3,9 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createQmdReader, addLineNumbers, type QmdReader } from "./src/qmd-reader.js";
 import { createMemoryStore, type MemoryStore } from "./src/memory-store.js";
 import { createRecallHook, createCaptureHook } from "./src/memory-hooks.js";
+import { buildQueryVariants, searchWithQueryVariants } from "./src/query-rewrite.js";
+import { inferCategoryWeights } from "./src/query-intent.js";
+import { postProcess, type ScoredResult } from "./src/post-process.js";
 
 const qmdSubSearchSchema = Type.Object({
   type: Type.Union([Type.Literal("lex"), Type.Literal("vec"), Type.Literal("hyde")], {
@@ -12,6 +15,23 @@ const qmdSubSearchSchema = Type.Object({
     minLength: 1,
     description: "Sub-query text.",
   }),
+});
+
+const compactPolicySchema = Type.Object({
+  promoteOccurrences: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
+  promoteConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  promoteImportance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  archiveAfterDays: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
+  summarizeBeforeArchive: Type.Optional(Type.Boolean()),
+});
+
+const preconsciousPolicySchema = Type.Object({
+  shortlistSize: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
+  importanceWeight: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  confidenceWeight: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  recencyWeight: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  maxAgeDays: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
+  categoryBoosts: Type.Optional(Type.Record(Type.String(), Type.Number({ minimum: 0, maximum: 1 }))),
 });
 
 const pluginConfigSchema = Type.Object({
@@ -79,6 +99,56 @@ const pluginConfigSchema = Type.Object({
   learningsDir: Type.Optional(
     Type.String({
       description: "Directory for agent self-improvement files (LEARNINGS.md, ERRORS.md).",
+    }),
+  ),
+  hybridEnabled: Type.Optional(
+    Type.Boolean({
+      default: true,
+      description: "Enable hybrid memory retrieval (BM25 + semantic scan fusion).",
+    }),
+  ),
+  hybridScanLimit: Type.Optional(
+    Type.Number({
+      default: 250,
+      minimum: 0,
+      maximum: 5000,
+      description: "Maximum number of memories to scan in the semantic branch.",
+    }),
+  ),
+  hybridLexicalWeight: Type.Optional(
+    Type.Number({
+      default: 0.7,
+      minimum: 0,
+      maximum: 1,
+      description: "Fusion weight for lexical/BM25 matches.",
+    }),
+  ),
+  hybridSemanticWeight: Type.Optional(
+    Type.Number({
+      default: 0.3,
+      minimum: 0,
+      maximum: 1,
+      description: "Fusion weight for semantic-scan matches.",
+    }),
+  ),
+  compactPolicy: Type.Optional(
+    Type.Object({
+      default: Type.Optional(compactPolicySchema),
+      profile: Type.Optional(compactPolicySchema),
+      preference: Type.Optional(compactPolicySchema),
+      entity: Type.Optional(compactPolicySchema),
+      event: Type.Optional(compactPolicySchema),
+      case: Type.Optional(compactPolicySchema),
+      pattern: Type.Optional(compactPolicySchema),
+    }, {
+      description: "Optional compaction policy overrides. Supports a global default and per-category overrides.",
+    }),
+  ),
+  preconsciousPolicy: Type.Optional(
+    Type.Object({
+      ...preconsciousPolicySchema.properties,
+    }, {
+      description: "Optional preconscious shortlist ranking and sizing policy.",
     }),
   ),
 });
@@ -195,6 +265,12 @@ function resolveConfig(pluginConfig: unknown): PluginConfig {
     captureMaxLength: input.captureMaxLength ?? 500,
     scope: input.scope,
     learningsDir: input.learningsDir,
+    hybridEnabled: input.hybridEnabled ?? true,
+    hybridScanLimit: input.hybridScanLimit ?? 250,
+    hybridLexicalWeight: input.hybridLexicalWeight ?? 0.7,
+    hybridSemanticWeight: input.hybridSemanticWeight ?? 0.3,
+    compactPolicy: input.compactPolicy,
+    preconsciousPolicy: input.preconsciousPolicy,
   };
 }
 
@@ -230,6 +306,31 @@ const memorySearchParameters = Type.Object({
       description: "Minimum relevance score.",
     }),
   ),
+  includeArchived: Type.Optional(
+    Type.Boolean({
+      description: "Include archived memories in historical search mode.",
+    }),
+  ),
+});
+
+const memoryStatsParameters = Type.Object({});
+const memoryObservationListParameters = Type.Object({
+  limit: Type.Optional(
+    Type.Number({
+      minimum: 1,
+      maximum: 50,
+      default: 10,
+      description: "Maximum observation entries to return.",
+    }),
+  ),
+  minConfidence: Type.Optional(
+    Type.Number({
+      minimum: 0,
+      maximum: 1,
+      default: 0,
+      description: "Only include observations with confidence at or above this threshold.",
+    }),
+  ),
 });
 
 const memoryGetParameters = Type.Object({
@@ -259,6 +360,25 @@ const memoryWriteParameters = Type.Object({
       description: "Short title for the memory file name.",
     }),
   ),
+  importance: Type.Optional(
+    Type.Number({
+      minimum: 0,
+      maximum: 1,
+      description: "Optional importance score.",
+    }),
+  ),
+  confidence: Type.Optional(
+    Type.Number({
+      minimum: 0,
+      maximum: 1,
+      description: "Optional confidence score.",
+    }),
+  ),
+  expiresAt: Type.Optional(
+    Type.String({
+      description: "Optional ISO timestamp after which this memory should expire.",
+    }),
+  ),
 });
 
 const memoryForgetParameters = Type.Object({
@@ -274,19 +394,68 @@ const memoryForgetParameters = Type.Object({
   ),
 });
 
+const memoryCompactParameters = Type.Object({});
+const memoryObservationReviewParameters = Type.Object({
+  id: Type.String({
+    minLength: 1,
+    description: "Observation id to review.",
+  }),
+  action: Type.Union([
+    Type.Literal("promote"),
+    Type.Literal("drop"),
+    Type.Literal("archive"),
+  ], {
+    description: "Review action to apply to the observation.",
+  }),
+});
+
 function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, store: MemoryStore) {
   api.registerTool(
     {
       name: "memory_search",
       label: "Memory Search",
-      description: "Search stored memories using BM25 full-text search.",
+      description: "Search stored memories using hybrid retrieval, metadata-aware reranking, and summaries.",
       parameters: memorySearchParameters,
       async execute(_id, params) {
-        const results = await store.search(
-          params.query as string,
-          (params.limit as number) ?? config.autoRecallLimit!,
-          (params.minScore as number) ?? config.autoRecallMinScore!,
+        const limit = (params.limit as number) ?? config.autoRecallLimit!;
+        const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
+        const query = params.query as string;
+        const includeArchived = (params.includeArchived as boolean | undefined) ?? false;
+        const candidateLimit = includeArchived ? Math.max(limit * 3, 10) : limit;
+        const { variants, results: rawResults } = await searchWithQueryVariants(
+          includeArchived ? store.searchWithArchived : store.search,
+          query,
+          candidateLimit,
+          minScore,
         );
+        const scored = postProcess(
+          rawResults.map((r) => ({
+            id: r.id,
+            content: r.content,
+            category: r.category,
+            score: r.score,
+            created: r.created,
+            accessCount: r.accessCount,
+            lastAccessedAt: r.lastAccessedAt,
+            importance: r.importance,
+            confidence: r.confidence,
+            sourceType: r.sourceType,
+            expiresAt: r.expiresAt,
+          })),
+          {
+            minScore,
+            categoryWeights: inferCategoryWeights(query),
+          },
+        );
+        const recalledMap = new Map(rawResults.map((r) => [r.id, r]));
+        const results = scored
+          .map((item) => {
+            const original = recalledMap.get(item.id);
+            return original ? { ...original, score: item.score } : null;
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null)
+          .slice(0, limit);
+        await store.recordAccess(results.map((item) => item.id));
         if (!results.length) {
           return {
             content: [{ type: "text", text: "No matching memories found." }],
@@ -297,13 +466,17 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
         const summaryResults = results.map((r) => ({
           id: r.id,
           category: r.category,
+          archived: r.archived ?? false,
           score: r.score,
           created: r.created,
           summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
         }));
         return {
           content: [{ type: "text", text: JSON.stringify(summaryResults, null, 2) }],
-          details: results,
+          details: {
+            variants,
+            results,
+          },
         };
       },
     },
@@ -317,16 +490,160 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       description: "Read a specific memory entry by id.",
       parameters: memoryGetParameters,
       async execute(_id, params) {
-        const entry = await store.get(params.id as string);
+        const memoryId = params.id as string;
+        const entry = await store.get(memoryId);
         if (!entry) {
           return {
             content: [{ type: "text", text: "" }],
             details: { text: "", path: params.id },
           };
         }
+        await store.recordAccess([memoryId]);
+        const refreshed = await store.get(memoryId);
         return {
-          content: [{ type: "text", text: JSON.stringify(entry, null, 2) }],
-          details: entry,
+          content: [{ type: "text", text: JSON.stringify(refreshed ?? entry, null, 2) }],
+          details: refreshed ?? entry,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "memory_search_archived",
+      label: "Memory Search Archived",
+      description: "Search archived long-term memories for historical context and compaction audit.",
+      parameters: memorySearchParameters,
+      async execute(_id, params) {
+        const limit = (params.limit as number) ?? config.autoRecallLimit!;
+        const minScore = (params.minScore as number) ?? config.autoRecallMinScore!;
+        const query = params.query as string;
+        const candidateLimit = Math.max(limit * 3, 10);
+        const { variants, results: rawResults } = await searchWithQueryVariants(
+          store.searchArchived,
+          query,
+          candidateLimit,
+          minScore,
+        );
+        const scored = postProcess(
+          rawResults.map((r) => ({
+            id: r.id,
+            content: r.content,
+            category: r.category,
+            score: r.score,
+            created: r.created,
+            accessCount: r.accessCount,
+            lastAccessedAt: r.lastAccessedAt,
+            importance: r.importance,
+            confidence: r.confidence,
+            sourceType: r.sourceType,
+            expiresAt: r.expiresAt,
+          })),
+          {
+            minScore,
+            categoryWeights: inferCategoryWeights(query),
+          },
+        );
+        const recalledMap = new Map(rawResults.map((r) => [r.id, r]));
+        const finalResults = scored
+          .map((item) => {
+            const original = recalledMap.get(item.id);
+            return original ? { ...original, score: item.score } : null;
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null)
+          .slice(0, limit);
+        await store.recordAccess(finalResults.map((item) => item.id));
+        if (!finalResults.length) {
+          return {
+            content: [{ type: "text", text: "No matching archived memories found." }],
+            details: [],
+          };
+        }
+        const summaryResults = finalResults.map((r) => ({
+          id: r.id,
+          category: r.category,
+          archived: r.archived ?? false,
+          score: r.score,
+          created: r.created,
+          summary: r.summary ?? r.abstract ?? (r.content.length > 200 ? r.content.slice(0, 200) + "..." : r.content),
+        }));
+        return {
+          content: [{ type: "text", text: JSON.stringify(summaryResults, null, 2) }],
+          details: {
+            variants,
+            results: finalResults,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "memory_stats",
+      label: "Memory Stats",
+      description: "Show memory totals, archived counts, stage distribution, and category-level observability.",
+      parameters: memoryStatsParameters,
+      async execute() {
+        const stats = await store.getStats();
+        return {
+          content: [{ type: "text", text: JSON.stringify(stats, null, 2) }],
+          details: stats,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "memory_observation_list",
+      label: "Observation List",
+      description: "List active staged observations for manual review.",
+      parameters: memoryObservationListParameters,
+      async execute(_id, params) {
+        const limit = (params.limit as number | undefined) ?? 10;
+        const minConfidence = (params.minConfidence as number | undefined) ?? 0;
+        const items = await store.listObservations(limit, minConfidence);
+        if (!items.length) {
+          return {
+            content: [{ type: "text", text: "No active observations found." }],
+            details: [],
+          };
+        }
+        const summary = items.map((item) => ({
+          id: item.id,
+          category: item.category,
+          confidence: item.confidence,
+          importance: item.importance,
+          created: item.created,
+          summary: item.summary ?? item.abstract ?? (item.content.length > 160 ? item.content.slice(0, 160) + "..." : item.content),
+        }));
+        return {
+          content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+          details: items,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "memory_observation_review",
+      label: "Observation Review",
+      description: "Manually promote, archive, or drop a staged observation.",
+      parameters: memoryObservationReviewParameters,
+      async execute(_id, params) {
+        const result = await store.reviewObservation(
+          params.id as string,
+          params.action as "promote" | "drop" | "archive",
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: result,
         };
       },
     },
@@ -345,10 +662,32 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
           params.category as string | undefined,
           params.tags as string[] | undefined,
           params.title as string | undefined,
+          {
+            importance: params.importance as number | undefined,
+            confidence: params.confidence as number | undefined,
+            expiresAt: params.expiresAt as string | undefined,
+          },
         );
         return {
           content: [{ type: "text", text: `Memory stored: ${entry.id}` }],
           details: entry,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "memory_compact",
+      label: "Memory Compact",
+      description: "Promote staged observations, archive stale or expired memories, and refresh long-term memory quality.",
+      parameters: memoryCompactParameters,
+      async execute() {
+        const report = await store.compact();
+        return {
+          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+          details: report,
         };
       },
     },
@@ -418,6 +757,7 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
   api.on("before_prompt_build", createRecallHook(store, {
     autoRecallLimit: config.autoRecallLimit!,
     autoRecallMinScore: config.autoRecallMinScore!,
+    preconsciousLimit: (config.preconsciousPolicy as Record<string, unknown> | undefined)?.shortlistSize as number | undefined,
     learningsDir: config.learningsDir,
   }));
 
@@ -475,11 +815,41 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
         const limit = (params.limit as number) ?? 10;
         const minScore = params.minScore as number | undefined;
         const collection = params.collection as string | undefined;
+        const variants = buildQueryVariants(queryText);
+        const merged = new Map<string, ReturnType<QmdReader["query"]>[number]>();
+        const perQueryLimit = Math.max(limit, Math.min(limit * 2, 20));
 
-        let results = reader.query(queryText, limit, collection);
+        for (const variant of variants) {
+          const hits = reader.query(variant, perQueryLimit, collection);
+          for (const hit of hits) {
+            const existing = merged.get(hit.id);
+            if (!existing || hit.score > existing.score) {
+              merged.set(hit.id, hit);
+            }
+          }
+        }
+
+        let results = [...merged.values()]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
         if (minScore !== undefined) {
           results = results.filter((r) => r.score >= minScore);
         }
+        const reranked = postProcess(
+          results.map((r) => ({
+            id: r.id,
+            content: r.content,
+            title: r.title,
+            score: r.score,
+          }) satisfies ScoredResult),
+          {
+            minScore,
+          },
+        );
+        const resultMap = new Map(results.map((r) => [r.id, r]));
+        results = reranked
+          .map((item) => resultMap.get(item.id))
+          .filter((item): item is NonNullable<typeof item> => item !== undefined);
 
         if (params.full) {
           const fullResults = results.map((r) => {
@@ -491,7 +861,7 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
           });
           return {
             content: [{ type: "text", text: JSON.stringify(fullResults, null, 2) }],
-            details: fullResults,
+            details: { variants, results: fullResults },
           };
         }
 
@@ -506,7 +876,7 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
 
         return {
           content: [{ type: "text", text: JSON.stringify(snippetResults, null, 2) }],
-          details: snippetResults,
+          details: { variants, results: snippetResults },
         };
       },
     },
@@ -652,6 +1022,13 @@ const plugin = {
       ? createMemoryStore({
           memoryDir: config.memoryDir,
           scope: config.scope,
+          hybridEnabled: config.hybridEnabled,
+          hybridScanLimit: config.hybridScanLimit,
+          hybridLexicalWeight: config.hybridLexicalWeight,
+          hybridSemanticWeight: config.hybridSemanticWeight,
+          compactPolicy: (config.compactPolicy as Record<string, unknown> | undefined)?.default as any,
+          compactCategoryPolicies: config.compactPolicy as any,
+          preconsciousPolicy: config.preconsciousPolicy as any,
         }).then((store) => {
           registerMemoryFeatures(api, config, store);
         })

@@ -90,6 +90,21 @@ describe("plugin tool registration", () => {
     expect(tools.has("qmd_multi_get")).toBe(true);
   });
 
+  it("registers memory_compact when memoryDir is configured", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "test.md", "Test", "test content");
+    const memoryDir = path.join(dir, "memories");
+    mkdirSync(memoryDir, { recursive: true });
+
+    const { tools } = await registerToolsAsync({ dbPath, memoryDir });
+    expect(tools.has("memory_compact")).toBe(true);
+    expect(tools.has("memory_search_archived")).toBe(true);
+    expect(tools.has("memory_stats")).toBe(true);
+    expect(tools.has("memory_observation_list")).toBe(true);
+    expect(tools.has("memory_observation_review")).toBe(true);
+  });
+
   it("qmd_query returns results from database", async () => {
     const dir = createTempDir();
     const { dbPath, db } = await createTestDb(dir);
@@ -102,8 +117,9 @@ describe("plugin tool registration", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.details.length).toBeGreaterThan(0);
-    expect(result.details[0].snippet).toContain("JWT");
+    expect(result.details.results.length).toBeGreaterThan(0);
+    expect(result.details.results[0].snippet).toContain("JWT");
+    expect(result.details.variants).toContain("JWT auth");
   });
 
   it("qmd_query returns error when no query provided", async () => {
@@ -148,5 +164,38 @@ describe("plugin tool registration", () => {
     expect(result.content[0].text).toContain("2: b");
     expect(result.content[0].text).toContain("3: c");
     expect(result.content[0].text).not.toContain("4: d");
+  });
+
+  it("qmd_query uses rewritten keyword query when raw question is too verbose", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "adoption.md", "Adoption", "Caroline research adoption agencies");
+
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_query")!.execute("call-5", {
+      query: "What did Caroline research?",
+      limit: 5,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.details.variants).toContain("caroline research");
+    expect(result.details.results.length).toBeGreaterThan(0);
+    expect(result.details.results[0].snippet).toContain("Caroline research");
+  });
+
+  it("qmd_query finds synonym-like matches through hybrid retrieval", async () => {
+    const dir = createTempDir();
+    const { dbPath, db } = await createTestDb(dir);
+    insertTestDoc(db, "notes", "family.md", "Family", "She wants to help kids in need and build a family.");
+
+    const { tools } = await registerToolsAsync({ dbPath });
+    const result = await tools.get("qmd_query")!.execute("call-6", {
+      query: "children family",
+      limit: 5,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.details.results.length).toBeGreaterThan(0);
+    expect(result.details.results[0].snippet).toContain("kids");
   });
 });

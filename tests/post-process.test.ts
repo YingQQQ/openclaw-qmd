@@ -6,6 +6,10 @@ import {
   applyTimeDecay,
   hardMinScoreFilter,
   applyMMRDiversity,
+  applyImportanceBoost,
+  applyConfidenceBoost,
+  applyExpiryPenalty,
+  applyAccessReinforcement,
   postProcess,
   type ScoredResult,
 } from '../src/post-process.js';
@@ -126,6 +130,47 @@ describe('hardMinScoreFilter', () => {
     const results: ScoredResult[] = [makeResult({ id: '1', score: 0.3 })];
     const filtered = hardMinScoreFilter(results, 0.3);
     expect(filtered).toHaveLength(1);
+  });
+});
+
+describe('metadata-aware boosts', () => {
+  it('boosts higher-importance results above lower-importance ones', () => {
+    const results: ScoredResult[] = [
+      makeResult({ id: 'low', importance: 0.1, score: 1.0 }),
+      makeResult({ id: 'high', importance: 0.9, score: 1.0 }),
+    ];
+    const boosted = applyImportanceBoost(results, 0.2);
+    expect(boosted.find((r) => r.id === 'high')!.score).toBeGreaterThan(boosted.find((r) => r.id === 'low')!.score);
+  });
+
+  it('boosts high-confidence results and slightly penalizes recovery sources', () => {
+    const results: ScoredResult[] = [
+      makeResult({ id: 'recovery', confidence: 0.9, sourceType: 'recovery', score: 1.0 }),
+      makeResult({ id: 'manual', confidence: 0.9, sourceType: 'manual', score: 1.0 }),
+    ];
+    const boosted = applyConfidenceBoost(results, 0.15);
+    expect(boosted.find((r) => r.id === 'manual')!.score).toBeGreaterThan(boosted.find((r) => r.id === 'recovery')!.score);
+  });
+
+  it('filters expired memories and boosts near-expiry ones', () => {
+    const future = new Date('2099-03-06T12:00:00.000Z').toISOString();
+    const past = new Date('2000-03-04T00:00:00.000Z').toISOString();
+    const results: ScoredResult[] = [
+      makeResult({ id: 'future', expiresAt: future, score: 1.0 }),
+      makeResult({ id: 'expired', expiresAt: past, score: 1.0 }),
+    ];
+    const processed = applyExpiryPenalty(results, 0.3);
+    expect(processed.map((r) => r.id)).toContain('future');
+    expect(processed.map((r) => r.id)).not.toContain('expired');
+  });
+
+  it('reinforces frequently accessed and recently used memories', () => {
+    const results: ScoredResult[] = [
+      makeResult({ id: 'cold', accessCount: 0, score: 1.0 }),
+      makeResult({ id: 'warm', accessCount: 8, lastAccessedAt: daysAgo(1), score: 1.0 }),
+    ];
+    const boosted = applyAccessReinforcement(results, 0.2, 14);
+    expect(boosted.find((r) => r.id === 'warm')!.score).toBeGreaterThan(boosted.find((r) => r.id === 'cold')!.score);
   });
 });
 

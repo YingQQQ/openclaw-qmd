@@ -85,6 +85,12 @@ const SCHEMA_SQL = `
     abstract TEXT,
     summary TEXT,
     scope TEXT,
+    confidence REAL NOT NULL DEFAULT 1,
+    source_type TEXT NOT NULL DEFAULT 'manual',
+    stage TEXT NOT NULL DEFAULT 'memory',
+    expires_at TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    aliases TEXT,
     FOREIGN KEY (hash) REFERENCES content(hash)
   );
 
@@ -123,6 +129,23 @@ const SCHEMA_SQL = `
 
 export function ensureSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+  ensureColumn(db, "documents", "confidence", "REAL NOT NULL DEFAULT 1");
+  ensureColumn(db, "documents", "source_type", "TEXT NOT NULL DEFAULT 'manual'");
+  ensureColumn(db, "documents", "stage", "TEXT NOT NULL DEFAULT 'memory'");
+  ensureColumn(db, "documents", "expires_at", "TEXT");
+  ensureColumn(db, "documents", "archived", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "documents", "aliases", "TEXT");
+}
+
+function ensureColumn(
+  db: Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((item) => item.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +299,12 @@ export function updateDocument(
     abstract?: string;
     summary?: string;
     scope?: string;
+    confidence?: number;
+    sourceType?: string;
+    stage?: string;
+    expiresAt?: string | null;
+    archived?: number;
+    aliases?: string | null;
     modifiedAt?: string;
   },
 ): void {
@@ -289,6 +318,12 @@ export function updateDocument(
   if (fields.abstract !== undefined) { sets.push("abstract = ?"); params.push(fields.abstract); }
   if (fields.summary !== undefined) { sets.push("summary = ?"); params.push(fields.summary); }
   if (fields.scope !== undefined) { sets.push("scope = ?"); params.push(fields.scope); }
+  if (fields.confidence !== undefined) { sets.push("confidence = ?"); params.push(fields.confidence); }
+  if (fields.sourceType !== undefined) { sets.push("source_type = ?"); params.push(fields.sourceType); }
+  if (fields.stage !== undefined) { sets.push("stage = ?"); params.push(fields.stage); }
+  if (fields.expiresAt !== undefined) { sets.push("expires_at = ?"); params.push(fields.expiresAt); }
+  if (fields.archived !== undefined) { sets.push("archived = ?"); params.push(fields.archived); }
+  if (fields.aliases !== undefined) { sets.push("aliases = ?"); params.push(fields.aliases); }
   if (fields.modifiedAt !== undefined) { sets.push("modified_at = ?"); params.push(fields.modifiedAt); }
 
   if (sets.length === 0) return;
@@ -307,29 +342,47 @@ export function findDocumentByPath(
 ): {
   id: number;
   hash: string;
+  title: string;
   category: string | null;
   importance: number;
   accessCount: number;
+  lastAccessedAt: string | null;
   abstract: string | null;
   summary: string | null;
   scope: string | null;
+  confidence: number;
+  sourceType: string;
+  stage: string;
+  expiresAt: string | null;
+  archived: number;
+  aliases: string | null;
   createdAt: string;
 } | null {
   return (
     (db
       .prepare(
-        `SELECT id, hash, category, importance, access_count as accessCount, abstract, summary, scope, created_at as createdAt
+        `SELECT id, hash, title, category, importance, access_count as accessCount, last_accessed_at as lastAccessedAt, abstract, summary, scope,
+                confidence, source_type as sourceType, stage, expires_at as expiresAt,
+                archived, aliases, created_at as createdAt
          FROM documents WHERE collection = ? AND path = ? AND active = 1`,
       )
       .get(collection, docPath) as {
       id: number;
       hash: string;
+      title: string;
       category: string | null;
       importance: number;
       accessCount: number;
+      lastAccessedAt: string | null;
       abstract: string | null;
       summary: string | null;
       scope: string | null;
+      confidence: number;
+      sourceType: string;
+      stage: string;
+      expiresAt: string | null;
+      archived: number;
+      aliases: string | null;
       createdAt: string;
     } | undefined) ?? null
   );
@@ -344,8 +397,37 @@ export type FTSResultExtended = FTSResult & {
   abstract: string | null;
   summary: string | null;
   scope: string | null;
+  confidence: number;
+  sourceType: string;
+  stage: string;
+  expiresAt: string | null;
+  archived: number;
+  aliases: string | null;
   createdAt: string;
 };
+
+export type DocumentScanRow = {
+  id: string;
+  docId: number;
+  title: string;
+  content: string;
+  category: string | null;
+  importance: number;
+  accessCount: number;
+  lastAccessedAt: string | null;
+  abstract: string | null;
+  summary: string | null;
+  scope: string | null;
+  confidence: number;
+  sourceType: string;
+  stage: string;
+  expiresAt: string | null;
+  archived: number;
+  aliases: string | null;
+  createdAt: string;
+};
+
+export type ArchivedFilter = "active" | "archived" | "all";
 
 export function searchFTSExtended(
   db: Database,
@@ -353,6 +435,8 @@ export function searchFTSExtended(
   limit = 20,
   collectionName?: string,
   scope?: string,
+  stage: "memory" | "observation" = "memory",
+  archivedFilter: ArchivedFilter = "active",
 ): FTSResultExtended[] {
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
@@ -372,14 +456,26 @@ export function searchFTSExtended(
       d.abstract,
       d.summary,
       d.scope,
+      d.confidence,
+      d.source_type as sourceType,
+      d.stage,
+      d.expires_at as expiresAt,
+      d.archived,
+      d.aliases,
       d.created_at as createdAt,
       bm25(documents_fts, 10.0, 1.0) as bm25_score
     FROM documents_fts f
     JOIN documents d ON d.id = f.rowid
     JOIN content ON content.hash = d.hash
-    WHERE documents_fts MATCH ? AND d.active = 1
+    WHERE documents_fts MATCH ? AND d.active = 1 AND d.stage = ?
   `;
-  const params: unknown[] = [ftsQuery];
+  const params: unknown[] = [ftsQuery, stage];
+
+  if (archivedFilter === "active") {
+    sql += ` AND d.archived = 0`;
+  } else if (archivedFilter === "archived") {
+    sql += ` AND d.archived = 1`;
+  }
 
   if (collectionName) {
     sql += ` AND d.collection = ?`;
@@ -408,6 +504,12 @@ export function searchFTSExtended(
     abstract: string | null;
     summary: string | null;
     scope: string | null;
+    confidence: number;
+    sourceType: string;
+    stage: string;
+    expiresAt: string | null;
+    archived: number;
+    aliases: string | null;
     createdAt: string;
     bm25_score: number;
   };
@@ -430,9 +532,71 @@ export function searchFTSExtended(
       abstract: row.abstract,
       summary: row.summary,
       scope: row.scope,
+      confidence: row.confidence,
+      sourceType: row.sourceType,
+      stage: row.stage,
+      expiresAt: row.expiresAt,
+      archived: row.archived,
+      aliases: row.aliases,
       createdAt: row.createdAt,
     };
   });
+}
+
+export function scanDocumentsExtended(
+  db: Database,
+  limit = 200,
+  collectionName?: string,
+  scope?: string,
+  stage: "memory" | "observation" = "memory",
+  archivedFilter: ArchivedFilter = "active",
+): DocumentScanRow[] {
+  let sql = `
+    SELECT
+      d.path as id,
+      d.id as docId,
+      d.title,
+      content.doc as content,
+      d.category,
+      d.importance,
+      d.access_count as accessCount,
+      d.last_accessed_at as lastAccessedAt,
+      d.abstract,
+      d.summary,
+      d.scope,
+      d.confidence,
+      d.source_type as sourceType,
+      d.stage,
+      d.expires_at as expiresAt,
+      d.archived,
+      d.aliases,
+      d.created_at as createdAt
+    FROM documents d
+    JOIN content ON content.hash = d.hash
+    WHERE d.active = 1 AND d.stage = ?
+  `;
+  const params: unknown[] = [stage];
+
+  if (archivedFilter === "active") {
+    sql += ` AND d.archived = 0`;
+  } else if (archivedFilter === "archived") {
+    sql += ` AND d.archived = 1`;
+  }
+
+  if (collectionName) {
+    sql += ` AND d.collection = ?`;
+    params.push(collectionName);
+  }
+
+  if (scope) {
+    sql += ` AND d.scope = ?`;
+    params.push(scope);
+  }
+
+  sql += ` ORDER BY d.modified_at DESC LIMIT ?`;
+  params.push(limit);
+
+  return db.prepare(sql).all(...params) as DocumentScanRow[];
 }
 
 export function insertDocumentExtended(
@@ -449,11 +613,16 @@ export function insertDocumentExtended(
     abstract?: string;
     summary?: string;
     scope?: string;
+    confidence?: number;
+    sourceType?: string;
+    stage?: "memory" | "observation";
+    expiresAt?: string | null;
+    aliases?: string | null;
   },
 ): void {
   db.prepare(
-    `INSERT INTO documents (collection, path, title, hash, active, created_at, modified_at, category, importance, abstract, summary, scope)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO documents (collection, path, title, hash, active, created_at, modified_at, category, importance, abstract, summary, scope, confidence, source_type, stage, expires_at, archived, aliases)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
   ).run(
     collection,
     docPath,
@@ -466,5 +635,10 @@ export function insertDocumentExtended(
     extra?.abstract ?? null,
     extra?.summary ?? null,
     extra?.scope ?? null,
+    extra?.confidence ?? 1,
+    extra?.sourceType ?? "manual",
+    extra?.stage ?? "memory",
+    extra?.expiresAt ?? null,
+    extra?.aliases ?? null,
   );
 }

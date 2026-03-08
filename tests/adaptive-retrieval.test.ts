@@ -6,8 +6,8 @@ describe('shouldSkipRetrieval', () => {
     expect(shouldSkipRetrieval('你好')).toBe(true);
   });
 
-  it('skips slash commands like "/help"', () => {
-    expect(shouldSkipRetrieval('/help')).toBe(true);
+  it('does not treat slash-prefixed input as an automatic skip', () => {
+    expect(shouldSkipRetrieval('/help me remember the deploy issue')).toBe(false);
   });
 
   it('skips affirmatives like "ok"', () => {

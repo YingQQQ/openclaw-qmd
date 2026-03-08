@@ -39,6 +39,63 @@
         "type": "boolean",
         "default": true,
         "description": "Automatically capture facts/decisions from conversations."
+      },
+      "captureMode": {
+        "anyOf": [
+          { "const": "semantic", "type": "string" },
+          { "const": "keyword", "type": "string" }
+        ],
+        "default": "keyword",
+        "description": "Capture mode: 'semantic' captures all non-noise text; 'keyword' uses trigger patterns."
+      },
+      "captureMaxLength": {
+        "type": "number",
+        "default": 500,
+        "minimum": 50,
+        "maximum": 10000,
+        "description": "Maximum text length for auto-capture."
+      },
+      "scope": {
+        "type": "string",
+        "description": "Memory scope (e.g. 'global', 'project:<path>'). Isolates memories by scope."
+      },
+      "learningsDir": {
+        "type": "string",
+        "description": "Directory for agent self-improvement files (LEARNINGS.md, ERRORS.md)."
+      },
+      "hybridEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable hybrid memory retrieval (BM25 + semantic scan fusion)."
+      },
+      "hybridScanLimit": {
+        "type": "number",
+        "default": 250,
+        "minimum": 0,
+        "maximum": 5000,
+        "description": "Maximum number of memories to scan in the semantic branch."
+      },
+      "hybridLexicalWeight": {
+        "type": "number",
+        "default": 0.7,
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Fusion weight for lexical/BM25 matches."
+      },
+      "hybridSemanticWeight": {
+        "type": "number",
+        "default": 0.3,
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Fusion weight for semantic-scan matches."
+      },
+      "compactPolicy": {
+        "type": "object",
+        "description": "Optional compaction policy overrides. Supports a global default and per-category overrides."
+      },
+      "preconsciousPolicy": {
+        "type": "object",
+        "description": "Optional preconscious shortlist sizing and ranking policy."
       }
     }
   },
@@ -74,6 +131,47 @@
     "autoCapture": {
       "label": "Auto-Capture",
       "help": "Automatically capture important information from conversations."
+    },
+    "captureMode": {
+      "label": "Capture Mode",
+      "advanced": true
+    },
+    "captureMaxLength": {
+      "label": "Capture Max Length",
+      "advanced": true
+    },
+    "scope": {
+      "label": "Memory Scope",
+      "advanced": true
+    },
+    "learningsDir": {
+      "label": "Learnings Directory",
+      "advanced": true
+    },
+    "hybridEnabled": {
+      "label": "Hybrid Retrieval",
+      "help": "Fuse BM25 with a lightweight semantic scan for memory search.",
+      "advanced": true
+    },
+    "hybridScanLimit": {
+      "label": "Hybrid Scan Limit",
+      "advanced": true
+    },
+    "hybridLexicalWeight": {
+      "label": "Hybrid Lexical Weight",
+      "advanced": true
+    },
+    "hybridSemanticWeight": {
+      "label": "Hybrid Semantic Weight",
+      "advanced": true
+    },
+    "compactPolicy": {
+      "label": "Compact Policy",
+      "advanced": true
+    },
+    "preconsciousPolicy": {
+      "label": "Preconscious Policy",
+      "advanced": true
     }
   }
 }

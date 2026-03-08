@@ -43,6 +43,7 @@ describe("formatMemoryFile / parseMemoryFile", () => {
   const entry: MemoryEntry = {
     id: "2026-03-06T09-15-00_auth-flow",
     content: "Auth flow uses JWT with refresh token rotation.",
+    title: "Auth Flow",
     category: "decision",
     tags: ["auth", "architecture"],
     created: "2026-03-06T09:15:00Z",
@@ -63,6 +64,20 @@ describe("formatMemoryFile / parseMemoryFile", () => {
     const formatted = formatMemoryFile(minimal);
     const parsed = parseMemoryFile(formatted);
     expect(parsed).toEqual(minimal);
+  });
+
+  it("roundtrips abstract and summary when present", () => {
+    const enriched: MemoryEntry = {
+      id: "rich-id",
+      content: "Detailed memory body.",
+      title: "Rich Entry",
+      created: "2026-01-01T00:00:00Z",
+      abstract: "Short abstract.",
+      summary: "Longer summary.",
+    };
+    const formatted = formatMemoryFile(enriched);
+    const parsed = parseMemoryFile(formatted);
+    expect(parsed).toEqual(enriched);
   });
 
   it("returns null for invalid input", () => {

@@ -4,7 +4,6 @@
 
 const SKIP_PATTERNS: RegExp[] = [
   /^(hi|hello|hey|你好|嗨|哈喽|早|晚安|good\s*(morning|evening|night))[\s!！.。]*$/i,
-  /^\//,
   /^(ok|okay|yes|no|sure|got it|好的?|是的?|嗯|行|可以|没问题|收到|对|不是?|understood)[\s!！.。]*$/i,
   /^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\s]+$/u,
   /^(ping|pong|heartbeat|health)$/i,

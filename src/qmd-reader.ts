@@ -16,9 +16,11 @@ import picomatch from "picomatch";
 import {
   openDatabase,
   searchFTS,
+  scanDocumentsExtended,
   type Database,
   type FTSResult,
 } from "./qmd-lite.js";
+import { fuseRankedResults, rankSemanticMatches } from "./hybrid-retrieval.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,6 +77,23 @@ export type FindDocumentsResult = {
   }[];
   errors: string[];
 };
+
+const readerClosers = new Set<() => void>();
+let readerExitHookInstalled = false;
+
+function installReaderExitHook() {
+  if (readerExitHookInstalled) return;
+  process.on("exit", () => {
+    for (const close of [...readerClosers]) {
+      try {
+        close();
+      } catch {
+        // ignore shutdown cleanup errors
+      }
+    }
+  });
+  readerExitHookInstalled = true;
+}
 
 // ---------------------------------------------------------------------------
 // YAML config reader (from qmd collections.js)
@@ -405,7 +424,49 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
   }
 
   function query(queryStr: string, limit = 10, collectionName?: string): FTSResult[] {
-    return searchFTS(db, queryStr, limit, collectionName);
+    const lexicalResults = searchFTS(db, queryStr, Math.max(limit * 3, 10), collectionName);
+    const semanticCandidates = scanDocumentsExtended(db, 250, collectionName);
+    const semanticResults = rankSemanticMatches(
+      queryStr,
+      semanticCandidates.map((item) => ({
+        id: item.id,
+        title: item.title,
+        content: item.content,
+        abstract: item.abstract ?? undefined,
+        summary: item.summary ?? undefined,
+      })),
+      Math.max(limit * 3, 10),
+    );
+
+    const fused = fuseRankedResults(
+      lexicalResults.map((hit) => ({ id: hit.id, score: hit.score })),
+      semanticResults,
+      Math.max(limit * 3, 10),
+      0.75,
+      0.25,
+    );
+
+    const lexicalMap = new Map(lexicalResults.map((item) => [item.id, item]));
+    const semanticMap = new Map(semanticCandidates.map((item) => [item.id, item]));
+
+    return fused
+      .map((item) => {
+        const lexical = lexicalMap.get(item.id);
+        if (lexical) {
+          return { ...lexical, score: item.score };
+        }
+        const semantic = semanticMap.get(item.id);
+        if (!semantic) return null;
+        return {
+          id: semantic.id,
+          content: semantic.content,
+          title: semantic.title,
+          collection: collectionName ?? "",
+          score: item.score,
+        } satisfies FTSResult;
+      })
+      .filter((item): item is FTSResult => item !== null)
+      .slice(0, limit);
   }
 
   function findDoc(filename: string, includeBody = false): FindDocumentResult {
@@ -595,14 +656,15 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
   function close(): void {
     if (closed) return;
     closed = true;
-    process.removeListener("exit", close);
+    readerClosers.delete(close);
     try {
       db?.close();
     } catch {
       // ignore
     }
   }
-  process.on("exit", close);
+  installReaderExitHook();
+  readerClosers.add(close);
 
   return {
     getStatus,
