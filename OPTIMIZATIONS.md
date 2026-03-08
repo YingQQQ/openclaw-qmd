@@ -192,6 +192,62 @@ Relevant files:
 - `tests/edge-cases.test.ts`
 - `tests/memory-store.test.ts`
 
+### 14. Five-Round Deep Code Review and Bug Fixes
+
+Systematic five-round review of the entire codebase, fixing ~43 defects spanning correctness, data integrity, and retrieval accuracy.
+
+**Layered context (L-series):**
+- Thresholds L2=0.8/L1=0.5 were designed for raw scores but post-pipeline scores are inflated by multiplicative weights. Added `normalizeScores()` in `layered-context.ts` to divide all scores by the max before threshold comparison. Updated thresholds to L2=0.85/L1=0.55.
+- `qmd_query` now oversamples `limit*3` before `rankResults` then slices after, preventing result starvation.
+- `findDocs` strips body from documents skipped during pagination.
+- LIKE query parameters in `qmd-reader.ts` escaped via `escapeLike()` to prevent wildcard injection.
+
+**Normalisation and pipeline fixes (N-series):**
+- `parseStoredDocumentContent` rewritten to only scan the first 4 lines for the metadata header, preventing false strips of body content.
+- `weightByCategory` now merges caller-supplied weights on top of `DEFAULT_CATEGORY_WEIGHTS` instead of replacing them.
+- `isRefusal` regex in `content-guard.ts` tightened with `\b` word boundary to prevent false positives on "I can notice/notify".
+- `memory_get` checks document existence before calling `recordAccess`.
+- `recoverPendingSession` now scans with `archivedFilter="all"` to also recover observations from the archived pool.
+
+**Data integrity and retrieval fixes (R-series, rounds 3-5):**
+- Three code paths (`rowToMemory`, `buildPreconscious`, compact promote) were calling `mergeContents` or `write()` with raw stored content that included the metadata prefix, causing double-wrapping. All three now strip via `parseStoredDocumentContent` first.
+- Compact grouping key uses `normalizeStoredContent` (metadata-stripped) instead of `normalizeKey` to prevent false duplicates.
+- `SYNONYM_MAP` rebuilt with stemmed keys to match the stemmed tokens produced by `tokenize()`.
+- Document-side in hybrid retrieval uses raw tokens only; only query-side expands synonyms.
+- `fuseRankedResults` replaced raw score mixing with pure RRF (rank-only) to avoid heterogeneous score combination.
+- `sanitizeFTS5Term` now replaces punctuation with spaces instead of deleting it, matching FTS5 Unicode61 tokenizer behavior.
+- `TurnTracker` gained `trimIfNeeded(maxSize=500)` to prevent unbounded set growth in long sessions.
+- Digest reflection and `detectCategory` in `memory-hooks.ts` cleaned up (dead rule removed, emoji range aligned).
+- `memory-dedup.ts`: category-mismatch in update range now falls through to merge check instead of creating a duplicate.
+- `query-rewrite.ts`: added `splitCJK` for character-level CJK tokenization.
+- `memory-format.ts`: tags and aliases escaped with `\"` before writing to frontmatter.
+- `experience-log.ts`: `---` separator lines in content escaped before write.
+- `memory-digest.ts`: LESSON_PATTERNS regex changed from greedy `.*` to non-greedy `.*?`.
+- `writeObservation` update path now fully rebuilds the content blob, hash, abstract, summary, and aliases, and triggers FTS index update so DB and FTS stay consistent.
+- Tags merged via Set union on update/merge paths.
+
+**Test coverage (278 → 293 tests):**
+- New tests for `normalizeScores`, boundary thresholds, inflated scores in `layered-context.test.ts`
+- `content-guard.test.ts`: false-positive guard tests
+- `integration.test.ts`, `memory-dedup.test.ts`: updated expectations to match fixed behavior
+
+Relevant files:
+- `src/layered-context.ts`
+- `src/memory-store.ts`
+- `src/memory-hooks.ts`
+- `src/hybrid-retrieval.ts`
+- `src/qmd-lite.ts`
+- `src/score-pipeline.ts`
+- `src/content-guard.ts`
+- `src/turn-tracker.ts`
+- `src/query-rewrite.ts`
+- `src/memory-format.ts`
+- `src/memory-dedup.ts`
+- `src/experience-log.ts`
+- `src/memory-digest.ts`
+- `index.ts`
+- `src/qmd-reader.ts`
+
 ## Good Next Steps
 
 ### 1. Better Stemming for Hybrid Retrieval
@@ -257,11 +313,11 @@ Suggested files:
 
 ## Validation Status
 
-As of 2026-03-08:
+As of 2026-03-08 (post round-5 review):
 
 - `npm run check` passes
 - `npm test` passes
-- Full test suite: 278 tests across 19 test files
+- Full test suite: 293 tests across 19 test files
 
 ## Open Questions
 

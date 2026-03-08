@@ -221,8 +221,10 @@ The core token optimization mechanism. Instead of injecting full memory content,
 | Layer | Tokens | Trigger | Content |
 |-------|--------|---------|---------|
 | L0 | ~100 | score >= minScore | Abstract (first sentence, max 150 chars) |
-| L1 | ~500 | score >= 0.5 | Summary (first paragraph, max 750 chars) |
-| L2 | full | score >= 0.8 | Complete content |
+| L1 | ~500 | score >= 0.55 | Summary (first paragraph, max 750 chars) |
+| L2 | full | score >= 0.85 | Complete content |
+
+Scores are normalized relative to the top result before threshold comparison, so thresholds reflect relative relevance rather than raw BM25 magnitude.
 
 Example injected context:
 
