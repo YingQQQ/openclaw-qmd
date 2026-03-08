@@ -19,7 +19,7 @@ function hasCJK(text: string): boolean {
   return CJK_RANGE.test(text);
 }
 
-export function shouldSkipRetrieval(query: string, minLength?: number): boolean {
+export function canSkipLookup(query: string, minLength?: number): boolean {
   const trimmed = query.trim();
   if (trimmed.length === 0) return true;
 
@@ -35,7 +35,7 @@ export function shouldSkipRetrieval(query: string, minLength?: number): boolean 
   return trimmed.length < minLen;
 }
 
-export function shouldForceRetrieve(query: string): boolean {
+export function mustLookup(query: string): boolean {
   const trimmed = query.trim();
   for (const pattern of FORCE_RETRIEVE_PATTERNS) {
     if (pattern.test(trimmed)) return true;

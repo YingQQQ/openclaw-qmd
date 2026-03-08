@@ -1,11 +1,11 @@
-export type ReflectionEntry = {
+export type DigestEntry = {
   type: "decision" | "user_model" | "lesson" | "invariant";
   content: string;
   confidence: number; // 0-1
 };
 
-export type ReflectionResult = {
-  entries: ReflectionEntry[];
+export type DigestResult = {
+  entries: DigestEntry[];
   sessionLength: number; // message turns
 };
 
@@ -32,7 +32,7 @@ const INVARIANT_PATTERNS = [
   /(?:remember to|don't forget|注意|记住)\s+(.{5,120})/i,
 ];
 
-export function jaccardSimilarity(a: string, b: string): number {
+export function tokenOverlap(a: string, b: string): number {
   const tokenize = (s: string): Set<string> => {
     const tokens = new Set<string>();
     const parts = s.toLowerCase().match(/[\u4e00-\u9fff]|[^\s\u4e00-\u9fff]+/g);
@@ -59,7 +59,7 @@ export function jaccardSimilarity(a: string, b: string): number {
 }
 
 type PatternGroup = {
-  type: ReflectionEntry["type"];
+  type: DigestEntry["type"];
   patterns: RegExp[];
   role: "assistant" | "user";
 };
@@ -86,13 +86,13 @@ function getMessageContent(msg: unknown): string {
   return "";
 }
 
-function deduplicate(entries: ReflectionEntry[]): ReflectionEntry[] {
-  const result: ReflectionEntry[] = [];
+function deduplicate(entries: DigestEntry[]): DigestEntry[] {
+  const result: DigestEntry[] = [];
   for (const entry of entries) {
     let dominated = false;
     for (let i = 0; i < result.length; i++) {
       if (result[i].type === entry.type) {
-        const sim = jaccardSimilarity(result[i].content, entry.content);
+        const sim = tokenOverlap(result[i].content, entry.content);
         if (sim > 0.8) {
           if (entry.confidence > result[i].confidence) {
             result[i] = entry;
@@ -109,14 +109,14 @@ function deduplicate(entries: ReflectionEntry[]): ReflectionEntry[] {
   return result;
 }
 
-export function extractReflections(messages: unknown[]): ReflectionResult {
+export function extractDigest(messages: unknown[]): DigestResult {
   const sessionLength = messages.length;
 
   if (sessionLength < MIN_SESSION_LENGTH) {
     return { entries: [], sessionLength };
   }
 
-  const entries: ReflectionEntry[] = [];
+  const entries: DigestEntry[] = [];
 
   for (const msg of messages) {
     const role = getMessageRole(msg);

@@ -1,13 +1,13 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-export type ErrorRecord = {
+export type MistakeRecord = {
   timestamp: string;
   description: string;
   resolution?: string;
 };
 
-export type LearningRecord = {
+export type InsightRecord = {
   timestamp: string;
   category: string;
   content: string;
@@ -33,8 +33,8 @@ function getContent(msg: unknown): string {
   return "";
 }
 
-export function detectErrorFixPattern(messages: unknown[]): ErrorRecord[] {
-  const records: ErrorRecord[] = [];
+export function extractCorrections(messages: unknown[]): MistakeRecord[] {
+  const records: MistakeRecord[] = [];
   const assistantMessages: { index: number; content: string }[] = [];
 
   for (let i = 0; i < messages.length; i++) {
@@ -85,9 +85,9 @@ function trimFileEntries(filePath: string, maxEntries: number): void {
   writeFileSync(filePath, kept.join("\n---\n") + "\n---\n\n", "utf-8");
 }
 
-export function appendLearning(
+export function recordInsight(
   learningsDir: string,
-  record: LearningRecord,
+  record: InsightRecord,
 ): void {
   ensureDir(learningsDir);
   const filePath = path.join(learningsDir, "LEARNINGS.md");
@@ -103,9 +103,9 @@ export function appendLearning(
   trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
-export function appendError(
+export function recordMistake(
   learningsDir: string,
-  record: ErrorRecord,
+  record: MistakeRecord,
 ): void {
   ensureDir(learningsDir);
   const filePath = path.join(learningsDir, "ERRORS.md");
@@ -124,12 +124,12 @@ export function appendError(
   trimFileEntries(filePath, MAX_FILE_ENTRIES);
 }
 
-export function readLearnings(learningsDir: string): LearningRecord[] {
+export function loadInsights(learningsDir: string): InsightRecord[] {
   const filePath = path.join(learningsDir, "LEARNINGS.md");
   if (!existsSync(filePath)) return [];
 
   const text = readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
-  const records: LearningRecord[] = [];
+  const records: InsightRecord[] = [];
 
   const blocks = text.split(/^---$/m).filter((b) => b.trim());
 
@@ -151,12 +151,12 @@ export function readLearnings(learningsDir: string): LearningRecord[] {
   return records;
 }
 
-export function readErrors(learningsDir: string): ErrorRecord[] {
+export function loadMistakes(learningsDir: string): MistakeRecord[] {
   const filePath = path.join(learningsDir, "ERRORS.md");
   if (!existsSync(filePath)) return [];
 
   const text = readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
-  const records: ErrorRecord[] = [];
+  const records: MistakeRecord[] = [];
 
   const blocks = text.split(/^---$/m).filter((b) => b.trim());
 
@@ -182,8 +182,8 @@ export function readErrors(learningsDir: string): ErrorRecord[] {
   return records;
 }
 
-export function formatLearningsContext(
-  records: LearningRecord[],
+export function formatInsightsContext(
+  records: InsightRecord[],
   maxRecords = 10,
 ): string {
   const recent = records.slice(-maxRecords);

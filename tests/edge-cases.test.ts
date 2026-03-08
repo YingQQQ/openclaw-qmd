@@ -4,10 +4,10 @@
 import { describe, it, expect } from "vitest";
 import { buildQueryVariants, searchWithQueryVariants } from "../src/query-rewrite.js";
 import { inferCategoryWeights } from "../src/query-intent.js";
-import { shouldSkipRetrieval } from "../src/adaptive-retrieval.js";
+import { canSkipLookup } from "../src/query-gate.js";
 import { getDedupeDecision, mergeContents } from "../src/memory-dedup.js";
 import { looksLikePromptInjection, escapeMemoryForPrompt } from "../src/memory-hooks.js";
-import { postProcess } from "../src/post-process.js";
+import { rankResults } from "../src/score-pipeline.js";
 import { slugify, generateMemoryId, parseMemoryFile, formatMemoryFile } from "../src/memory-format.js";
 
 // ---------------------------------------------------------------------------
@@ -53,20 +53,20 @@ describe("query-intent edge cases", () => {
 });
 
 // ---------------------------------------------------------------------------
-// adaptive-retrieval: boundary values
+// query-gate: boundary values
 // ---------------------------------------------------------------------------
-describe("adaptive-retrieval edge cases", () => {
+describe("query-gate edge cases", () => {
   it("skips empty string", () => {
-    expect(shouldSkipRetrieval("")).toBe(true);
+    expect(canSkipLookup("")).toBe(true);
   });
 
   it("does not skip with custom minLength=2 for short text", () => {
     // "hi" matches SKIP_PATTERNS so it's still skipped regardless of minLength
-    expect(shouldSkipRetrieval("hi", 2)).toBe(true);
+    expect(canSkipLookup("hi", 2)).toBe(true);
   });
 
   it("handles mixed CJK + Latin", () => {
-    const result = shouldSkipRetrieval("React 组件设计模式是什么");
+    const result = canSkipLookup("React 组件设计模式是什么");
     expect(result).toBe(false); // long enough, not trivial
   });
 });
@@ -152,16 +152,16 @@ describe("prompt injection detection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// post-process: edge cases
+// score-pipeline: edge cases
 // ---------------------------------------------------------------------------
-describe("post-process edge cases", () => {
+describe("score-pipeline edge cases", () => {
   it("handles empty results array", () => {
-    const result = postProcess([], { minScore: 0.1 });
+    const result = rankResults([], { minScore: 0.1 });
     expect(result).toEqual([]);
   });
 
   it("handles single result", () => {
-    const result = postProcess(
+    const result = rankResults(
       [{
         id: "a",
         content: "hello world",
@@ -174,7 +174,7 @@ describe("post-process edge cases", () => {
   });
 
   it("filters below minScore", () => {
-    const result = postProcess(
+    const result = rankResults(
       [{
         id: "a",
         content: "hello",

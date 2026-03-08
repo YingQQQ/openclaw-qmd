@@ -5,7 +5,7 @@ import { createMemoryStore, type MemoryStore, type CompactPolicyConfig, type Pre
 import { createRecallHook, createCaptureHook } from "./src/memory-hooks.js";
 import { buildQueryVariants, searchWithQueryVariants } from "./src/query-rewrite.js";
 import { inferCategoryWeights } from "./src/query-intent.js";
-import { postProcess, type ScoredResult } from "./src/post-process.js";
+import { rankResults, type RankedEntry } from "./src/score-pipeline.js";
 
 const qmdSubSearchSchema = Type.Object({
   type: Type.Union([Type.Literal("lex"), Type.Literal("vec"), Type.Literal("hyde")], {
@@ -98,7 +98,7 @@ const pluginConfigSchema = Type.Object({
   ),
   learningsDir: Type.Optional(
     Type.String({
-      description: "Directory for agent self-improvement files (LEARNINGS.md, ERRORS.md).",
+      description: "Directory for agent experience log files (LEARNINGS.md, ERRORS.md).",
     }),
   ),
   hybridEnabled: Type.Optional(
@@ -426,7 +426,7 @@ async function executeMemorySearch(
     candidateLimit,
     minScore,
   );
-  const scored = postProcess(
+  const scored = rankResults(
     rawResults.map((r) => ({
       id: r.id,
       content: r.content,
@@ -827,13 +827,13 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
           if (minScore !== undefined) {
             results = results.filter((r) => r.score >= minScore);
           }
-          const reranked = postProcess(
+          const reranked = rankResults(
             results.map((r) => ({
               id: r.id,
               content: r.content,
               title: r.title,
               score: r.score,
-            }) satisfies ScoredResult),
+            }) satisfies RankedEntry),
             {
               minScore,
             },

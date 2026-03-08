@@ -1,19 +1,19 @@
 import type { MemoryStore, RecalledMemory } from "./memory-store.js";
-import { shouldSkipRetrieval, shouldForceRetrieve } from "./adaptive-retrieval.js";
-import { isNoise, filterNoise } from "./noise-filter.js";
-import { postProcess, type ScoredResult } from "./post-process.js";
+import { canSkipLookup, mustLookup } from "./query-gate.js";
+import { isLowQuality, filterLowQuality } from "./content-guard.js";
+import { rankResults, type RankedEntry } from "./score-pipeline.js";
 import { formatLayeredContext, type LayeredMemory } from "./layered-context.js";
-import { createSessionTracker, quickHash, type SessionTracker } from "./session-tracker.js";
-import { extractReflections } from "./memory-reflection.js";
+import { createTurnTracker, fnvLiteHash, type TurnTracker } from "./turn-tracker.js";
+import { extractDigest } from "./memory-digest.js";
 import { searchWithQueryVariants } from "./query-rewrite.js";
 import { inferCategoryWeights } from "./query-intent.js";
 import {
-  detectErrorFixPattern,
-  appendLearning,
-  appendError,
-  readLearnings,
-  formatLearningsContext,
-} from "./self-improvement.js";
+  extractCorrections,
+  recordInsight,
+  recordMistake,
+  loadInsights,
+  formatInsightsContext,
+} from "./experience-log.js";
 
 export type RecallHookConfig = {
   autoRecallLimit: number;
@@ -76,7 +76,7 @@ function toLayeredMemories(results: RecalledMemory[]): LayeredMemory[] {
   }));
 }
 
-function toScoredResults(results: RecalledMemory[]): ScoredResult[] {
+function toRankedEntrys(results: RecalledMemory[]): RankedEntry[] {
   return results.map((r) => ({
     id: r.id,
     content: r.content,
@@ -93,7 +93,7 @@ function toScoredResults(results: RecalledMemory[]): ScoredResult[] {
 }
 
 export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
-  const session = createSessionTracker();
+  const session = createTurnTracker();
 
   return async (event: { prompt: string }): Promise<{ prependContext?: string } | void> => {
     const query = event.prompt?.trim();
@@ -104,7 +104,7 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
       await store.compact();
     }
 
-    if (!shouldForceRetrieve(query) && shouldSkipRetrieval(query)) return;
+    if (!mustLookup(query) && canSkipLookup(query)) return;
 
     const preconscious = await store.buildPreconscious(config.preconsciousLimit ?? 3);
     const includeArchived = shouldIncludeArchivedRecall(query);
@@ -121,7 +121,7 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     const unseenResults = session.filterRecalled(rawResults);
     if (!unseenResults.length && preconscious.length === 0) return;
 
-    const processed = postProcess(toScoredResults(unseenResults), {
+    const processed = rankResults(toRankedEntrys(unseenResults), {
       minScore: config.autoRecallMinScore,
       categoryWeights: inferCategoryWeights(query),
     });
@@ -160,9 +160,9 @@ export function createRecallHook(store: MemoryStore, config: RecallHookConfig) {
     if (context) parts.push(context);
 
     if (config.learningsDir) {
-      const learnings = readLearnings(config.learningsDir);
+      const learnings = loadInsights(config.learningsDir);
       if (learnings.length > 0) {
-        parts.push(formatLearningsContext(learnings, 5));
+        parts.push(formatInsightsContext(learnings, 5));
       }
     }
 
@@ -196,7 +196,7 @@ export function shouldCapture(
   const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length;
   if (emojiCount > 3) return false;
   if (looksLikePromptInjection(text)) return false;
-  if (isNoise(text)) return false;
+  if (isLowQuality(text)) return false;
 
   if (mode === "semantic") return true;
   return MEMORY_TRIGGERS.some((r) => r.test(text));
@@ -217,14 +217,14 @@ export function detectCategory(text: string): string {
 export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig) {
   const captureMode = config?.captureMode ?? "keyword";
   const captureMaxLength = config?.captureMaxLength ?? DEFAULT_CAPTURE_MAX_CHARS;
-  const session = createSessionTracker();
+  const session = createTurnTracker();
 
   return async (event: { messages: unknown[]; success: boolean }): Promise<void> => {
     if (!event.success) return;
 
     const texts = extractUserTexts(event.messages);
 
-    const cleaned = filterNoise(texts);
+    const cleaned = filterLowQuality(texts);
 
     const toCapture = cleaned.filter((t) => shouldCapture(t, captureMode, captureMaxLength));
     if (!toCapture.length) return;
@@ -242,7 +242,7 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     let stored = 0;
     let reflectionStored = 0;
     for (const text of toCapture.slice(0, 5)) {
-      const hash = quickHash(text);
+      const hash = fnvLiteHash(text);
       if (session.wasCaptured(hash)) continue;
 
       const existing = await store.search(text, 1, 0.9);
@@ -262,7 +262,7 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     }
 
     if (event.messages.length >= 10) {
-      const reflections = extractReflections(event.messages);
+      const reflections = extractDigest(event.messages);
       for (const entry of reflections.entries.slice(0, 3)) {
         const cat = entry.type === "user_model" ? "preference" : entry.type === "lesson" ? "case" : "pattern";
         await store.writeObservation(entry.content, cat, undefined, undefined, {
@@ -275,10 +275,10 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     }
 
     if (config?.learningsDir) {
-      const errors = detectErrorFixPattern(event.messages);
+      const errors = extractCorrections(event.messages);
       for (const err of errors) {
-        appendError(config.learningsDir, err);
-        appendLearning(config.learningsDir, {
+        recordMistake(config.learningsDir, err);
+        recordInsight(config.learningsDir, {
           timestamp: err.timestamp,
           category: "error_fix",
           content: `${err.description} → ${err.resolution ?? "unknown fix"}`,

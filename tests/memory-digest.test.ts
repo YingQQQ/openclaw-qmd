@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  extractReflections,
-  jaccardSimilarity,
-} from "../src/memory-reflection.js";
+  extractDigest,
+  tokenOverlap,
+} from "../src/memory-digest.js";
 
 // Helper to build message arrays
 function msg(role: string, content: string) {
@@ -20,13 +20,13 @@ function padMessages(
   return [...pad, ...extra];
 }
 
-describe("extractReflections", () => {
+describe("extractDigest", () => {
   it("returns empty entries when session length < 10", () => {
     const messages = [
       msg("user", "hello"),
       msg("assistant", "decided to use JWT for auth"),
     ];
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     expect(result.entries).toEqual([]);
     expect(result.sessionLength).toBe(2);
   });
@@ -36,7 +36,7 @@ describe("extractReflections", () => {
       [msg("assistant", "I decided to use JWT for authentication in this project")],
       11,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const decisions = result.entries.filter((e) => e.type === "decision");
     expect(decisions.length).toBeGreaterThanOrEqual(1);
     expect(decisions[0].content).toMatch(/JWT/i);
@@ -47,7 +47,7 @@ describe("extractReflections", () => {
       [msg("user", "I prefer TypeScript over JavaScript for all projects")],
       11,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const models = result.entries.filter((e) => e.type === "user_model");
     expect(models.length).toBeGreaterThanOrEqual(1);
     expect(models[0].content).toMatch(/TypeScript/i);
@@ -61,7 +61,7 @@ describe("extractReflections", () => {
       ],
       12,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const lessons = result.entries.filter((e) => e.type === "lesson");
     expect(lessons.length).toBeGreaterThanOrEqual(1);
   });
@@ -71,7 +71,7 @@ describe("extractReflections", () => {
       [msg("assistant", "always run tests before commit to catch regressions early")],
       11,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const invariants = result.entries.filter((e) => e.type === "invariant");
     expect(invariants.length).toBeGreaterThanOrEqual(1);
     expect(invariants[0].content).toMatch(/tests/i);
@@ -85,7 +85,7 @@ describe("extractReflections", () => {
       ],
       12,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const decisions = result.entries.filter((e) => e.type === "decision");
     expect(decisions.length).toBe(1);
   });
@@ -100,23 +100,23 @@ describe("extractReflections", () => {
       ],
       14,
     );
-    const result = extractReflections(messages);
+    const result = extractDigest(messages);
     const types = new Set(result.entries.map((e) => e.type));
     expect(types.size).toBeGreaterThanOrEqual(3);
   });
 });
 
-describe("jaccardSimilarity", () => {
+describe("tokenOverlap", () => {
   it("returns 1.0 for identical strings", () => {
-    expect(jaccardSimilarity("hello world", "hello world")).toBe(1.0);
+    expect(tokenOverlap("hello world", "hello world")).toBe(1.0);
   });
 
   it("returns ~0.33 for partially overlapping strings", () => {
-    const sim = jaccardSimilarity("hello world", "goodbye world");
+    const sim = tokenOverlap("hello world", "goodbye world");
     expect(sim).toBeCloseTo(1 / 3, 1);
   });
 
   it("returns 0 for two empty strings", () => {
-    expect(jaccardSimilarity("", "")).toBe(0);
+    expect(tokenOverlap("", "")).toBe(0);
   });
 });

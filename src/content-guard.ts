@@ -17,25 +17,25 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
   /^(是的?|对|right|correct|exactly)[\s!！.。]*$/i,
 ];
 
-export function isDenial(text: string): boolean {
+export function isRefusal(text: string): boolean {
   const trimmed = text.trim();
   return DENIAL_PATTERNS.some((p) => p.test(trimmed));
 }
 
-export function isMetaQuestion(text: string): boolean {
+export function isIntrospective(text: string): boolean {
   const trimmed = text.trim();
   return META_QUESTION_PATTERNS.some((p) => p.test(trimmed));
 }
 
-export function isBoilerplate(text: string): boolean {
+export function isGenericOutput(text: string): boolean {
   const trimmed = text.trim();
   return BOILERPLATE_PATTERNS.some((p) => p.test(trimmed));
 }
 
-export function isNoise(text: string): boolean {
-  return isDenial(text) || isMetaQuestion(text) || isBoilerplate(text);
+export function isLowQuality(text: string): boolean {
+  return isRefusal(text) || isIntrospective(text) || isGenericOutput(text);
 }
 
-export function filterNoise(texts: string[]): string[] {
-  return texts.filter((t) => !isNoise(t));
+export function filterLowQuality(texts: string[]): string[] {
+  return texts.filter((t) => !isLowQuality(t));
 }
