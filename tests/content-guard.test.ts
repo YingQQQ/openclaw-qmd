@@ -16,8 +16,24 @@ describe('isRefusal', () => {
     expect(isRefusal('抱歉我无法完成')).toBe(true);
   });
 
+  it('detects "I cannot"', () => {
+    expect(isRefusal('I cannot do that')).toBe(true);
+  });
+
+  it('detects "I can not"', () => {
+    expect(isRefusal('I can not help with that')).toBe(true);
+  });
+
   it('does not flag normal text', () => {
     expect(isRefusal('I prefer using TypeScript')).toBe(false);
+  });
+
+  it('does not flag "I can notice"', () => {
+    expect(isRefusal('I can notice the difference')).toBe(false);
+  });
+
+  it('does not flag "I can notify"', () => {
+    expect(isRefusal('I can notify the team about this')).toBe(false);
   });
 });
 

@@ -383,8 +383,7 @@ describe("integration: full plugin lifecycle", () => {
     expect(getResult.details.importance).toBe(0.88);
     expect(getResult.details.confidence).toBe(0.77);
     expect(getResult.details.content).toBe("Important follow-up memory");
-    expect(getResult.details.accessCount).toBe(1);
-    expect(getResult.details.lastAccessedAt).toBeTruthy();
+    expect(getResult.details.accessCount).toBe(0);
   });
 
   it("preconsciousPolicy.shortlistSize controls the injected shortlist length", async () => {

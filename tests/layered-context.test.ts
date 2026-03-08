@@ -5,6 +5,7 @@ import {
   generateAbstract,
   generateSummary,
   formatLayeredContext,
+  normalizeScores,
   type LayeredMemory,
 } from "../src/layered-context.js";
 
@@ -21,7 +22,23 @@ describe("determineLayer", () => {
     expect(determineLayer(0.3)).toBe("L0");
   });
 
-  it("score 0.5 with default thresholds → L1 (boundary)", () => {
+  it("score at l1Threshold boundary → L1", () => {
+    expect(determineLayer(0.55)).toBe("L1");
+  });
+
+  it("score just below l1Threshold → L0", () => {
+    expect(determineLayer(0.54)).toBe("L0");
+  });
+
+  it("score at l2Threshold boundary → L2", () => {
+    expect(determineLayer(0.85)).toBe("L2");
+  });
+
+  it("score just below l2Threshold → L1", () => {
+    expect(determineLayer(0.84)).toBe("L1");
+  });
+
+  it("custom thresholds override defaults", () => {
     expect(
       determineLayer(0.5, { l2Threshold: 0.8, l1Threshold: 0.5 }),
     ).toBe("L1");
@@ -81,6 +98,10 @@ describe("generateAbstract", () => {
     expect(result.endsWith("...")).toBe(true);
   });
 
+  it("extracts first sentence ending with English period", () => {
+    expect(generateAbstract("First sentence. Second sentence.")).toBe("First sentence.");
+  });
+
   it("returns full content if shorter than maxChars", () => {
     expect(generateAbstract("Short.")).toBe("Short.");
   });
@@ -102,6 +123,41 @@ describe("generateSummary", () => {
     const result = generateSummary(longText);
     expect(result.length).toBe(750);
     expect(result.endsWith("...")).toBe(true);
+  });
+});
+
+describe("normalizeScores", () => {
+  it("最高分归一化为 1.0，其余按比例缩放", () => {
+    const memories: LayeredMemory[] = [
+      { id: "a", content: "x", score: 0.9 },
+      { id: "b", content: "y", score: 0.45 },
+      { id: "c", content: "z", score: 0.3 },
+    ];
+    const result = normalizeScores(memories);
+    expect(result[0].score).toBeCloseTo(1.0);
+    expect(result[1].score).toBeCloseTo(0.5);
+    expect(result[2].score).toBeCloseTo(0.333, 2);
+  });
+
+  it("膨胀分数（如 rankResults 输出）归一化后恢复合理区间", () => {
+    const memories: LayeredMemory[] = [
+      { id: "a", content: "x", score: 1.87 },
+      { id: "b", content: "y", score: 1.2 },
+      { id: "c", content: "z", score: 0.52 },
+    ];
+    const result = normalizeScores(memories);
+    expect(result[0].score).toBeCloseTo(1.0);
+    expect(result[1].score).toBeCloseTo(0.642, 2);
+    expect(result[2].score).toBeCloseTo(0.278, 2);
+  });
+
+  it("空数组返回空数组", () => {
+    expect(normalizeScores([])).toEqual([]);
+  });
+
+  it("单条记忆归一化为 1.0", () => {
+    const result = normalizeScores([{ id: "a", content: "x", score: 0.4 }]);
+    expect(result[0].score).toBeCloseTo(1.0);
   });
 });
 
@@ -145,5 +201,18 @@ describe("formatLayeredContext", () => {
 
   it("returns empty string for empty array", () => {
     expect(formatLayeredContext([])).toBe("");
+  });
+
+  it("膨胀分数经归一化后正确分层（而非全部 L2）", () => {
+    const memories: LayeredMemory[] = [
+      { id: "1", content: "Top hit", abstract: "Top", score: 1.87 },
+      { id: "2", content: "Mid hit", summary: "Mid summary", score: 1.2 },
+      { id: "3", content: "Low hit", abstract: "Low", score: 0.52 },
+    ];
+    const output = formatLayeredContext(memories);
+    expect(output).toContain("[L2]");
+    expect(output).toContain("[L1]");
+    expect(output).toContain("[L0]");
+    expect(output).not.toMatch(/\[L2\].*\[L2\].*\[L2\]/s);
   });
 });

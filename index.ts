@@ -518,7 +518,6 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
       async execute(_id, params) {
         try {
           const memoryId = params.id as string;
-          await store.recordAccess([memoryId]);
           const entry = await store.get(memoryId);
           if (!entry) {
             return {
@@ -526,6 +525,7 @@ function registerMemoryFeatures(api: OpenClawPluginApi, config: PluginConfig, st
               details: { text: "", path: params.id },
             };
           }
+          await store.recordAccess([memoryId]);
           return {
             content: [{ type: "text", text: JSON.stringify(entry, null, 2) }],
             details: entry,
@@ -821,14 +821,15 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
             }
           }
 
-          let results = [...merged.values()]
+          const oversampleLimit = Math.max(limit * 3, 15);
+          let candidates = [...merged.values()]
             .sort((a, b) => b.score - a.score)
-            .slice(0, limit);
+            .slice(0, oversampleLimit);
           if (minScore !== undefined) {
-            results = results.filter((r) => r.score >= minScore);
+            candidates = candidates.filter((r) => r.score >= minScore);
           }
           const reranked = rankResults(
-            results.map((r) => ({
+            candidates.map((r) => ({
               id: r.id,
               content: r.content,
               title: r.title,
@@ -838,8 +839,9 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
               minScore,
             },
           );
-          const resultMap = new Map(results.map((r) => [r.id, r]));
-          results = reranked
+          const resultMap = new Map(candidates.map((r) => [r.id, r]));
+          let results = reranked
+            .slice(0, limit)
             .map((item) => resultMap.get(item.id))
             .filter((item): item is NonNullable<typeof item> => item !== undefined);
 

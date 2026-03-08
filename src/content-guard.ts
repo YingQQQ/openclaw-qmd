@@ -1,6 +1,6 @@
 const DENIAL_PATTERNS: RegExp[] = [
   /i('m| am) (sorry|unable|not able|afraid)/i,
-  /i can('t|not| not)/i,
+  /i can('t|not\b| not\b)/i,
   /as an ai/i,
   /对不起|抱歉|我(无法|不能|做不到)/,
 ];

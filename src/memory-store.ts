@@ -222,17 +222,33 @@ function normalizeKey(text: string): string {
 
 function parseStoredDocumentContent(text: string): { content: string; tags?: string[]; aliases?: string[] } {
   const lines = text.split("\n");
-  const tagsLine = lines.find((line) => /^tags:\s+/i.test(line.trim()));
-  const aliasesLine = lines.find((line) => /^aliases:\s+/i.test(line.trim()));
-  const content = lines
-    .filter((line, index) => {
-      if (index === 0 && /^\[[^\]]+\]$/.test(line.trim())) return false;
-      if (/^tags:\s+/i.test(line.trim())) return false;
-      if (/^aliases:\s+/i.test(line.trim())) return false;
-      return true;
-    })
-    .join("\n")
-    .trim();
+  let headerEnd = 0;
+  let tagsLine: string | undefined;
+  let aliasesLine: string | undefined;
+
+  // Header is at most the first 3 lines: [category], tags: ..., aliases: ...
+  for (let i = 0; i < Math.min(lines.length, 4); i++) {
+    const trimmed = lines[i].trim();
+    if (i === 0 && /^\[[^\]]+\]$/.test(trimmed)) {
+      headerEnd = i + 1;
+      continue;
+    }
+    if (headerEnd > 0 || i === 0) {
+      if (/^tags:\s+/i.test(trimmed)) {
+        tagsLine = trimmed;
+        headerEnd = i + 1;
+        continue;
+      }
+      if (/^aliases:\s+/i.test(trimmed)) {
+        aliasesLine = trimmed;
+        headerEnd = i + 1;
+        continue;
+      }
+    }
+    break;
+  }
+
+  const content = lines.slice(headerEnd).join("\n").trim();
 
   const tags = tagsLine
     ? tagsLine.replace(/^tags:\s+/i, "").split(/\s+/).map((item) => item.trim()).filter(Boolean)
@@ -377,9 +393,10 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   function rowToMemory(row: FTSResultExtended | DocumentScanRow, score: number): RecalledMemory {
+    const parsed = parseStoredDocumentContent(row.content);
     return {
       id: row.id,
-      content: row.content,
+      content: parsed.content,
       title: row.title,
       category: row.category ?? undefined,
       score,
@@ -502,7 +519,8 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
       if ((dedup.decision === "update" || dedup.decision === "merge") && dedup.matchId) {
         const existingDoc = findDocumentByPath(db, collection, dedup.matchId);
         if (existingDoc) {
-          const existingContent = getDocContent(existingDoc.hash);
+          const existingRaw = getDocContent(existingDoc.hash);
+          const existingContent = existingRaw ? parseStoredDocumentContent(existingRaw).content : null;
           const nextContent = dedup.decision === "merge" && existingContent
             ? mergeContents(existingContent, content)
             : content;
@@ -855,7 +873,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
     const observations = scanDocumentsExtended(db, 500, collection, scope, "observation");
     const groups = new Map<string, DocumentScanRow[]>();
     for (const item of observations) {
-      const key = normalizeKey(item.content);
+      const key = normalizeStoredContent(item.content);
       const bucket = groups.get(key) ?? [];
       bucket.push(item);
       groups.set(key, bucket);
@@ -883,8 +901,9 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         maxImportance >= policy.promoteImportance;
 
       if (shouldPromote) {
+        const cleanContent = parseStoredDocumentContent(latest.content).content;
         const promotedEntry = await write(
-          latest.content,
+          cleanContent,
           latest.category ?? undefined,
           undefined,
           latest.title,
@@ -1070,8 +1089,8 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
 
     let recovered = 0;
     const existingNormalized = new Set<string>([
-      ...scanDocumentsExtended(db, 1000, collection, scope, "observation").map((item) => normalizeStoredContent(item.content)),
-      ...scanDocumentsExtended(db, 1000, collection, scope, "memory").map((item) => normalizeStoredContent(item.content)),
+      ...scanDocumentsExtended(db, 1000, collection, scope, "observation", "all").map((item) => normalizeStoredContent(item.content)),
+      ...scanDocumentsExtended(db, 1000, collection, scope, "memory", "all").map((item) => normalizeStoredContent(item.content)),
     ]);
     for (const entry of parsed.entries ?? []) {
       const normalized = normalizeKey(entry.content);

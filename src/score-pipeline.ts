@@ -59,10 +59,13 @@ export function boostByFreshness(
 
 export function weightByCategory(
   results: RankedEntry[],
-  weights: Record<string, number> = DEFAULT_CATEGORY_WEIGHTS,
+  weights?: Record<string, number>,
 ): RankedEntry[] {
+  const merged = weights
+    ? { ...DEFAULT_CATEGORY_WEIGHTS, ...weights }
+    : DEFAULT_CATEGORY_WEIGHTS;
   return results.map((r) => {
-    const w = r.category ? (weights[r.category] ?? 1.0) : 1.0;
+    const w = r.category ? (merged[r.category] ?? 1.0) : 1.0;
     return { ...r, score: r.score * w };
   });
 }

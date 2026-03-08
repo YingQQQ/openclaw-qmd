@@ -202,15 +202,19 @@ const SELECT_COLS_WITH_BODY = `
   content.doc as body
 `;
 
+function escapeLike(value: string): string {
+  return value.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+}
+
 function findDocumentByDocid(db: Database, docid: string): { filepath: string; hash: string } | null {
   const shortHash = normalizeDocid(docid);
   if (shortHash.length < 1) return null;
   const doc = db.prepare(`
     SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.hash
     FROM documents d
-    WHERE d.hash LIKE ? AND d.active = 1
+    WHERE d.hash LIKE ? ESCAPE '\\' AND d.active = 1
     LIMIT 1
-  `).get(`${shortHash}%`) as { filepath: string; hash: string } | undefined;
+  `).get(`${escapeLike(shortHash)}%`) as { filepath: string; hash: string } | undefined;
   return doc ?? null;
 }
 
@@ -471,9 +475,9 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
       doc = db.prepare(`
         SELECT ${cols}
         FROM documents d JOIN content ON content.hash = d.hash
-        WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
+        WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? ESCAPE '\\' AND d.active = 1
         LIMIT 1
-      `).get(`%${filepath}`) as DocRow | undefined;
+      `).get(`%${escapeLike(filepath)}`) as DocRow | undefined;
     }
 
     if (!doc && !filepath.startsWith("qmd://")) {
@@ -571,9 +575,9 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
           doc = db.prepare(`
             SELECT ${cols}
             FROM documents d JOIN content ON content.hash = d.hash
-            WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
+            WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? ESCAPE '\\' AND d.active = 1
             LIMIT 1
-          `).get(`%${name}`) as DocRow | undefined;
+          `).get(`%${escapeLike(name)}`) as DocRow | undefined;
         }
 
         if (doc) {
@@ -604,8 +608,9 @@ export async function createQmdReader(config: QmdReaderConfig = {}): Promise<Qmd
 
     const docs = fileRows.map((row) => {
       if (row.body_length > maxBytes) {
+        const { body: _, ...rowWithoutBody } = row;
         return {
-          doc: rowToDocument(row, config),
+          doc: rowToDocument(rowWithoutBody as DocRow, config),
           skipped: true,
           skipReason: `File too large (${Math.round(row.body_length / 1024)}KB > ${Math.round(maxBytes / 1024)}KB)`,
         };
