@@ -3,7 +3,7 @@ import { canSkipLookup, mustLookup } from "./query-gate.js";
 import { isLowQuality, filterLowQuality } from "./content-guard.js";
 import { rankResults, type RankedEntry } from "./score-pipeline.js";
 import { formatLayeredContext, type LayeredMemory } from "./layered-context.js";
-import { createTurnTracker, fnvLiteHash, type TurnTracker } from "./turn-tracker.js";
+import { createTurnTracker, djb2Hash, type TurnTracker } from "./turn-tracker.js";
 import { extractDigest } from "./memory-digest.js";
 import { searchWithQueryVariants } from "./query-rewrite.js";
 import { inferCategoryWeights } from "./query-intent.js";
@@ -242,7 +242,7 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     let stored = 0;
     let reflectionStored = 0;
     for (const text of toCapture.slice(0, 5)) {
-      const hash = fnvLiteHash(text);
+      const hash = djb2Hash(text);
       if (session.wasCaptured(hash)) continue;
 
       const existing = await store.search(text, 1, 0.9);

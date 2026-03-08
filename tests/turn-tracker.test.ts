@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createTurnTracker, fnvLiteHash } from "../src/turn-tracker.js";
+import { createTurnTracker, djb2Hash } from "../src/turn-tracker.js";
 
 describe("TurnTracker", () => {
   it("markRecalled + wasRecalled: 标记后返回 true，未标记返回 false", () => {
@@ -12,11 +12,11 @@ describe("TurnTracker", () => {
 
   it("markCaptured + wasCaptured: 标记后返回 true，未标记返回 false", () => {
     const tracker = createTurnTracker();
-    const hash = fnvLiteHash("hello world");
+    const hash = djb2Hash("hello world");
     expect(tracker.wasCaptured(hash)).toBe(false);
     tracker.markCaptured(hash);
     expect(tracker.wasCaptured(hash)).toBe(true);
-    expect(tracker.wasCaptured(fnvLiteHash("other text"))).toBe(false);
+    expect(tracker.wasCaptured(djb2Hash("other text"))).toBe(false);
   });
 
   it("recalledCount: 标记 3 个后返回 3", () => {
@@ -29,8 +29,8 @@ describe("TurnTracker", () => {
 
   it("capturedCount: 标记 2 个后返回 2", () => {
     const tracker = createTurnTracker();
-    tracker.markCaptured(fnvLiteHash("text-1"));
-    tracker.markCaptured(fnvLiteHash("text-2"));
+    tracker.markCaptured(djb2Hash("text-1"));
+    tracker.markCaptured(djb2Hash("text-2"));
     expect(tracker.capturedCount()).toBe(2);
   });
 
@@ -54,7 +54,7 @@ describe("TurnTracker", () => {
   it("clear: 清理后 count 为 0，was 返回 false", () => {
     const tracker = createTurnTracker();
     tracker.markRecalled("x");
-    tracker.markCaptured(fnvLiteHash("y"));
+    tracker.markCaptured(djb2Hash("y"));
     expect(tracker.recalledCount()).toBe(1);
     expect(tracker.capturedCount()).toBe(1);
 
@@ -62,7 +62,7 @@ describe("TurnTracker", () => {
     expect(tracker.recalledCount()).toBe(0);
     expect(tracker.capturedCount()).toBe(0);
     expect(tracker.wasRecalled("x")).toBe(false);
-    expect(tracker.wasCaptured(fnvLiteHash("y"))).toBe(false);
+    expect(tracker.wasCaptured(djb2Hash("y"))).toBe(false);
   });
 
   it("重复 markRecalled 同一 id 不增加 count", () => {
@@ -74,18 +74,18 @@ describe("TurnTracker", () => {
   });
 });
 
-describe("fnvLiteHash", () => {
+describe("djb2Hash", () => {
   it("相同文本返回相同 hash", () => {
-    expect(fnvLiteHash("hello")).toBe(fnvLiteHash("hello"));
+    expect(djb2Hash("hello")).toBe(djb2Hash("hello"));
   });
 
   it("不同文本返回不同 hash", () => {
-    expect(fnvLiteHash("hello")).not.toBe(fnvLiteHash("world"));
+    expect(djb2Hash("hello")).not.toBe(djb2Hash("world"));
   });
 
   it("空字符串有确定性结果", () => {
-    const h1 = fnvLiteHash("");
-    const h2 = fnvLiteHash("");
+    const h1 = djb2Hash("");
+    const h2 = djb2Hash("");
     expect(h1).toBe(h2);
     expect(typeof h1).toBe("string");
     expect(h1.length).toBeGreaterThan(0);
