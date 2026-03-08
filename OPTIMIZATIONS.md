@@ -151,93 +151,120 @@ Relevant files:
 - `tests/memory-store.test.ts`
 - `README.md`
 
+### 13. Comprehensive Security and Robustness Hardening
+
+Two-pass code review and fix cycle covering security, correctness, error handling, and test coverage.
+
+**Security fixes:**
+- Path traversal prevention: `sanitizeId()` in `memory-store.ts` strips directory separators and `..` sequences from user-supplied memory IDs
+- Expanded prompt injection detection: added ChatML (`<|im_start|>`/`<|im_end|>`), HTML comment (`<!-- system -->`), and Llama (`[INST]`/`[/INST]`) patterns to `memory-hooks.ts`
+- SQL identifier validation: `ensureColumn()` in `qmd-lite.ts` now validates table/column names against `^[a-zA-Z_][a-zA-Z0-9_]*$`
+- Removed `memory_forget` auto-delete: search results always return candidate list for explicit user confirmation
+
+**Correctness fixes:**
+- Fixed expiry penalty direction in `post-process.ts`: near-expiry memories now correctly receive a score penalty (`1 - penalty`) instead of a boost (`1 + penalty`)
+- Fixed `trimFileEntries()` in `self-improvement.ts`: proper separator handling when truncating LEARNINGS.md/ERRORS.md
+
+**Robustness improvements:**
+- All 9 memory tools and `qmd_query` wrapped in try-catch with `toolError()` for graceful error responses
+- `compact()` DB operations wrapped in `db.transaction()` for atomicity, with counters/actions updated outside the transaction
+- `memoryPromise` initialization chain has `.catch()` for graceful degradation
+- Added `Database.transaction()` to the `qmd-lite.ts` interface
+- LEARNINGS.md/ERRORS.md auto-trimmed to 200 entries max
+
+**Code quality:**
+- Extracted `executeMemorySearch()` to eliminate duplication between `memory_search` and `memory_search_archived`
+- Replaced 3 `as any` casts with proper `Partial<CompactPolicyConfig>` / `Partial<PreconsciousPolicyConfig>` types
+
+**Test coverage (221 → 278 tests):**
+- New `tests/qmd-lite.test.ts` (24 tests): openDatabase, schema, CRUD, FTS search, transactions
+- New `tests/edge-cases.test.ts` (28 tests): boundary values for query-rewrite, query-intent, adaptive-retrieval, memory-dedup, prompt injection, post-process, memory-format
+- New `sanitizeId` security tests in `memory-store.test.ts` (5 tests): path traversal, absolute paths, empty IDs
+
+Relevant files:
+- `index.ts`
+- `src/memory-store.ts`
+- `src/memory-hooks.ts`
+- `src/post-process.ts`
+- `src/qmd-lite.ts`
+- `src/self-improvement.ts`
+- `tests/qmd-lite.test.ts`
+- `tests/edge-cases.test.ts`
+- `tests/memory-store.test.ts`
+
 ## Good Next Steps
 
-### 1. Configurable Preconscious Policy
+### 1. Better Stemming for Hybrid Retrieval
 
-Current preconscious selection is still hardcoded.
+Current stemming in `hybrid-retrieval.ts` is a naive suffix-stripping approach. Words like "string" can be incorrectly reduced to "str".
 
-Useful config knobs:
+Potential improvement:
+- Implement a proper Porter stemmer or use a lightweight stemming library
+- Add stemming-aware unit tests with known edge cases
 
-- shortlist size
-- importance weight
-- confidence weight
-- recency weight
-- category boosts
-- max age
+Suggested files:
+- `src/hybrid-retrieval.ts`
+- `tests/hybrid-retrieval.test.ts`
+
+### 2. File-DB Synchronization
+
+SQLite and Markdown files can drift apart. Currently `memory_get` uses SQLite as truth but falls back to file content.
+
+Potential improvement:
+- Add a `memory_fsck` tool that detects and repairs inconsistencies
+- Log warnings when file/DB content diverges
 
 Suggested files:
 - `src/memory-store.ts`
-- `src/memory-hooks.ts`
 - `index.ts`
-- `openclaw.plugin.json`
 
-### 2. Access Reinforcement
+### 3. YAML Format Hardening
 
-Current ranking uses recency, category, confidence, importance, and expiry, but does not strongly learn from repeated successful recall/use.
+Memory file frontmatter uses simple quote escaping. Content containing `---` or YAML special characters could break parsing.
 
 Potential improvement:
-
-- increase score or half-life for repeatedly useful memories
-- distinguish "seen often" from "useful often"
+- Use block scalar syntax (`|`) for multi-line values
+- Or switch to a proper YAML serialization library
 
 Suggested files:
-- `src/qmd-lite.ts`
+- `src/memory-format.ts`
+- `tests/memory-format.test.ts`
+
+### 4. Adaptive Access Reinforcement
+
+Current access reinforcement treats all access signals equally. Distinguishing "seen" from "useful" would improve ranking over time.
+
+Potential improvement:
+- Track explicit user references (e.g., `memory_get` after `memory_search`) as stronger signals
+- Decay stale access counts
+
+Suggested files:
 - `src/post-process.ts`
-- `src/memory-hooks.ts`
+- `src/memory-store.ts`
 
-### 3. Stronger Alias Generation
+### 5. Error Recovery and Resilience
 
-Current alias generation is intentionally lightweight.
+Database corruption, permission errors, and disk-full scenarios are not handled gracefully.
 
 Potential improvement:
-
-- generate aliases from title, tags, category, first sentence, and compact summaries
-- optionally add a dedicated alias-expansion utility
+- Detect corrupted SQLite files and offer automatic rebuild from Markdown files
+- Add read-only fallback mode when write operations fail
+- Implement `recordAccess` error isolation (currently one failure aborts the loop)
 
 Suggested files:
 - `src/memory-store.ts`
-- `src/query-rewrite.ts`
-
-### 4. Observation Aging / Review Queue
-
-Observation staging exists, but there is no dedicated review queue.
-
-Potential improvement:
-
-- observations older than a threshold could be:
-  - promoted
-  - archived
-  - dropped
-  - surfaced for manual review
-
-Suggested files:
-- `src/memory-store.ts`
-- `index.ts`
-
-### 5. Compaction Explainability
-
-Compaction returns counts, but not detailed reasons.
-
-Potential improvement:
-
-- emit richer compact reports:
-  - which ids were promoted
-  - which ids were archived
-  - why each action happened
-
-Suggested files:
-- `src/memory-store.ts`
-- `index.ts`
+- `src/qmd-lite.ts`
 
 ## Validation Status
 
-At the time this file was written:
+As of 2026-03-08:
 
 - `npm run check` passes
 - `npm test` passes
-- full test suite passes with 221 tests
+- Full test suite: 278 tests across 19 test files
 
 ## Open Questions
 
 - For archived/historical recall, should archived memories only participate when explicitly requested, or should some query intents allow low-weight archived candidates by default?
+- Should `sanitizeId` use a strict whitelist (`[a-zA-Z0-9_\-.]`) instead of relying on `path.basename()`?
+- Is the current 200-entry limit for LEARNINGS.md/ERRORS.md appropriate, or should it be configurable?
