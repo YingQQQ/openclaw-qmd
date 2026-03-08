@@ -114,7 +114,7 @@ export function weightByReliability(
   weight = 0.15,
 ): RankedEntry[] {
   return results.map((r) => {
-    const confidence = Math.max(0, Math.min(1, r.confidence ?? 1));
+    const confidence = Math.max(0, Math.min(1, r.confidence ?? 0.7));
     const sourcePenalty = r.sourceType === "recovery" ? 0.97 : 1;
     return { ...r, score: r.score * (1 + confidence * weight) * sourcePenalty };
   });

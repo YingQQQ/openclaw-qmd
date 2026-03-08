@@ -32,8 +32,18 @@ const SYNONYM_GROUPS = [
 
 const SYNONYM_MAP = new Map<string, string[]>();
 for (const group of SYNONYM_GROUPS) {
+  const stemmedGroup = group.map(stemToken);
   for (const token of group) {
-    SYNONYM_MAP.set(token, group.filter((item) => item !== token));
+    const stemmed = stemToken(token);
+    const others = stemmedGroup.filter((s) => s !== stemmed);
+    const existing = SYNONYM_MAP.get(stemmed);
+    if (existing) {
+      for (const o of others) {
+        if (!existing.includes(o)) existing.push(o);
+      }
+    } else {
+      SYNONYM_MAP.set(stemmed, [...new Set(others)]);
+    }
   }
 }
 
@@ -64,7 +74,7 @@ function expandTokens(tokens: string[]): Set<string> {
     const synonyms = SYNONYM_MAP.get(token);
     if (synonyms) {
       for (const synonym of synonyms) {
-        expanded.add(stemToken(synonym));
+        expanded.add(synonym);
       }
     }
   }

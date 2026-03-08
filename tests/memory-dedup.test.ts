@@ -31,13 +31,21 @@ describe("getDedupeDecision", () => {
     expect(result.reason).toBe("high similarity, same category");
   });
 
-  it("score 0.88 different category → create", () => {
+  it("score 0.88 different category → merge (fall through from update)", () => {
     const matches: ExistingMatch[] = [
       { id: "e3", content: "old", category: "preference", score: 0.88 },
     ];
     const result = getDedupeDecision("new content", "fact", matches);
+    expect(result.decision).toBe("merge");
+    expect(result.matchId).toBe("e3");
+  });
+
+  it("score 0.88 different category + noMerge category → create", () => {
+    const matches: ExistingMatch[] = [
+      { id: "e3", content: "old", category: "preference", score: 0.88 },
+    ];
+    const result = getDedupeDecision("new content", "event", matches);
     expect(result.decision).toBe("create");
-    expect(result.reason).toBe("distinct enough");
   });
 
   it("score 0.75 normal category → merge", () => {

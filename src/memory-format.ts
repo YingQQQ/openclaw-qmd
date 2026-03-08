@@ -62,7 +62,7 @@ export function formatMemoryFile(entry: MemoryEntry): string {
     lines.push(`category: "${entry.category}"`);
   }
   if (entry.tags?.length) {
-    lines.push(`tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
+    lines.push(`tags: [${entry.tags.map((t) => `"${t.replace(/"/g, '\\"')}"`).join(", ")}]`);
   }
   lines.push(`created: "${entry.created}"`);
   if (entry.importance !== undefined && entry.importance !== 0.5) {
@@ -93,7 +93,7 @@ export function formatMemoryFile(entry: MemoryEntry): string {
     lines.push(`archived: true`);
   }
   if (entry.aliases?.length) {
-    lines.push(`aliases: [${entry.aliases.map((t) => `"${t}"`).join(", ")}]`);
+    lines.push(`aliases: [${entry.aliases.map((t) => `"${t.replace(/"/g, '\\"')}"`).join(", ")}]`);
   }
   lines.push("---");
   lines.push("");

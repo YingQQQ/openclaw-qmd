@@ -47,7 +47,7 @@ export function getDedupeDecision(
         reason: "high similarity, same category",
       };
     }
-    return { decision: "create", reason: "distinct enough" };
+    // Category mismatch in update range: fall through to merge check
   }
 
   if (best.score >= o.mergeThreshold!) {

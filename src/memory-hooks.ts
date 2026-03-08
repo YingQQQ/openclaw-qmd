@@ -193,7 +193,7 @@ export function shouldCapture(
   if (text.includes("<recalled-memories>")) return false;
   if (text.startsWith("<") && text.includes("</")) return false;
   if (text.includes("**") && text.includes("\n-")) return false;
-  const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length;
+  const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu) || []).length;
   if (emojiCount > 3) return false;
   if (looksLikePromptInjection(text)) return false;
   if (isLowQuality(text)) return false;
@@ -210,7 +210,6 @@ export function detectCategory(text: string): string {
   if (/\+\d{10,}|@[\w.-]+\.\w+|is called/i.test(lower)) return "entity";
   if (/(?:bug|error|issue|fix|solved|错误|修复|解决)/i.test(lower)) return "case";
   if (/always|never|must|一定|永远|必须/i.test(lower)) return "pattern";
-  if (/is|are|has|have/i.test(lower)) return "entity";
   return "entity";
 }
 
@@ -264,12 +263,22 @@ export function createCaptureHook(store: MemoryStore, config?: CaptureHookConfig
     if (event.messages.length >= 10) {
       const reflections = extractDigest(event.messages);
       for (const entry of reflections.entries.slice(0, 3)) {
+        const hash = djb2Hash(entry.content);
+        if (session.wasCaptured(hash)) continue;
+
+        const existing = await store.search(entry.content, 1, 0.9);
+        if (existing.length > 0) {
+          session.markCaptured(hash);
+          continue;
+        }
+
         const cat = entry.type === "user_model" ? "preference" : entry.type === "lesson" ? "case" : "pattern";
         await store.writeObservation(entry.content, cat, undefined, undefined, {
           confidence: entry.confidence,
           importance: entry.type === "lesson" ? 0.85 : 0.7,
           sourceType: "reflection",
         });
+        session.markCaptured(hash);
         reflectionStored++;
       }
     }

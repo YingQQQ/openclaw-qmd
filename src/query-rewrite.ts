@@ -12,12 +12,16 @@ const STOP_WORDS = new Set([
   "me", "him", "her", "them", "my", "your", "his", "their", "our", "likely",
 ]);
 
+function splitCJK(text: string): string {
+  return text.replace(/([\u4e00-\u9fff\u3400-\u4dbf])/gu, " $1 ");
+}
+
 function normalizeTokens(text: string): string[] {
-  return text
+  return splitCJK(text)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s']/gu, " ")
     .split(/\s+/)
-    .filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
+    .filter((token) => token.length >= 1 && !STOP_WORDS.has(token));
 }
 
 export function buildQueryVariants(

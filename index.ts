@@ -885,48 +885,52 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
       description: "Read a qmd document by file path, qmd URI, or docid.",
       parameters: getParameters,
       async execute(_id, params) {
-        const file = params.file as string;
-        const result = reader.findDocument(file);
+        try {
+          const file = params.file as string;
+          const result = reader.findDocument(file);
 
-        if ("error" in result) {
-          let msg = `Document not found: ${result.query}`;
-          if (result.similarFiles.length > 0) {
-            msg += `\nDid you mean: ${result.similarFiles.join(", ")}?`;
+          if ("error" in result) {
+            let msg = `Document not found: ${result.query}`;
+            if (result.similarFiles.length > 0) {
+              msg += `\nDid you mean: ${result.similarFiles.join(", ")}?`;
+            }
+            return {
+              content: [{ type: "text", text: msg }],
+              isError: true,
+              details: result,
+            };
           }
+
+          const fromLine = params.fromLine as number | undefined;
+          const maxLines = params.maxLines as number | undefined;
+          let body = reader.getDocumentBody(result.filepath, fromLine, maxLines);
+
+          if (body === null) {
+            return {
+              content: [{ type: "text", text: `Document found but body not available: ${result.filepath}` }],
+              isError: true,
+              details: result,
+            };
+          }
+
+          if (params.lineNumbers) {
+            body = addLineNumbers(body, fromLine ?? 1);
+          }
+
+          const header = [
+            `# ${result.displayPath}`,
+            result.context ? `Context: ${result.context}` : null,
+            `Collection: ${result.collectionName} | docid: ${result.docid}`,
+            "",
+          ].filter((l) => l !== null).join("\n");
+
           return {
-            content: [{ type: "text", text: msg }],
-            isError: true,
-            details: result,
+            content: [{ type: "text", text: header + body }],
+            details: { ...result, body },
           };
+        } catch (error) {
+          return toolError(error);
         }
-
-        const fromLine = params.fromLine as number | undefined;
-        const maxLines = params.maxLines as number | undefined;
-        let body = reader.getDocumentBody(result.filepath, fromLine, maxLines);
-
-        if (body === null) {
-          return {
-            content: [{ type: "text", text: `Document found but body not available: ${result.filepath}` }],
-            isError: true,
-            details: result,
-          };
-        }
-
-        if (params.lineNumbers) {
-          body = addLineNumbers(body, fromLine ?? 1);
-        }
-
-        const header = [
-          `# ${result.displayPath}`,
-          result.context ? `Context: ${result.context}` : null,
-          `Collection: ${result.collectionName} | docid: ${result.docid}`,
-          "",
-        ].filter((l) => l !== null).join("\n");
-
-        return {
-          content: [{ type: "text", text: header + body }],
-          details: { ...result, body },
-        };
       },
     },
     { optional: true },
@@ -939,51 +943,55 @@ function registerQmdTools(api: OpenClawPluginApi, reader: QmdReader) {
       description: "Read multiple qmd documents by glob pattern or comma-separated file list.",
       parameters: multiGetParameters,
       async execute(_id, params) {
-        const pattern = params.pattern as string;
-        const maxBytes = params.maxBytes as number | undefined;
-        const maxLines = params.maxLines as number | undefined;
+        try {
+          const pattern = params.pattern as string;
+          const maxBytes = params.maxBytes as number | undefined;
+          const maxLines = params.maxLines as number | undefined;
 
-        const result = reader.findDocuments(pattern, { maxBytes, includeBody: true });
+          const result = reader.findDocuments(pattern, { maxBytes, includeBody: true });
 
-        const output: string[] = [];
+          const output: string[] = [];
 
-        for (const { doc, skipped, skipReason } of result.docs) {
-          if (skipped) {
-            output.push(`--- ${doc.displayPath} (SKIPPED: ${skipReason}) ---`);
-            continue;
+          for (const { doc, skipped, skipReason } of result.docs) {
+            if (skipped) {
+              output.push(`--- ${doc.displayPath} (SKIPPED: ${skipReason}) ---`);
+              continue;
+            }
+
+            let body = doc.body ?? reader.getDocumentBody(doc.filepath) ?? "";
+            if (maxLines) {
+              body = body.split("\n").slice(0, maxLines).join("\n");
+            }
+            if (params.lineNumbers) {
+              body = addLineNumbers(body);
+            }
+
+            output.push(`--- ${doc.displayPath} ---\n${body}`);
           }
 
-          let body = doc.body ?? reader.getDocumentBody(doc.filepath) ?? "";
-          if (maxLines) {
-            body = body.split("\n").slice(0, maxLines).join("\n");
-          }
-          if (params.lineNumbers) {
-            body = addLineNumbers(body);
+          for (const err of result.errors) {
+            output.push(`ERROR: ${err}`);
           }
 
-          output.push(`--- ${doc.displayPath} ---\n${body}`);
+          const json = {
+            files: result.docs.map(({ doc, skipped, skipReason }) => ({
+              filepath: doc.filepath,
+              displayPath: doc.displayPath,
+              title: doc.title,
+              docid: doc.docid,
+              skipped,
+              skipReason,
+            })),
+            errors: result.errors,
+          };
+
+          return {
+            content: [{ type: "text", text: output.join("\n\n") || "(no results)" }],
+            details: json,
+          };
+        } catch (error) {
+          return toolError(error);
         }
-
-        for (const err of result.errors) {
-          output.push(`ERROR: ${err}`);
-        }
-
-        const json = {
-          files: result.docs.map(({ doc, skipped, skipReason }) => ({
-            filepath: doc.filepath,
-            displayPath: doc.displayPath,
-            title: doc.title,
-            docid: doc.docid,
-            skipped,
-            skipReason,
-          })),
-          errors: result.errors,
-        };
-
-        return {
-          content: [{ type: "text", text: output.join("\n\n") || "(no results)" }],
-          details: json,
-        };
       },
     },
     { optional: true },

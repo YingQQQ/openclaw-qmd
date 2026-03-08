@@ -520,23 +520,26 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
         const existingDoc = findDocumentByPath(db, collection, dedup.matchId);
         if (existingDoc) {
           const existingRaw = getDocContent(existingDoc.hash);
-          const existingContent = existingRaw ? parseStoredDocumentContent(existingRaw).content : null;
+          const existingParsed = existingRaw ? parseStoredDocumentContent(existingRaw) : null;
+          const existingContent = existingParsed?.content ?? null;
           const nextContent = dedup.decision === "merge" && existingContent
             ? mergeContents(existingContent, content)
             : content;
+          const mergedTags = [...new Set([...(existingParsed?.tags ?? []), ...(tags ?? [])])];
           const now = new Date().toISOString();
           const abstract = generateAbstract(nextContent);
           const summary = generateSummary(nextContent);
           const mergedAliases = buildAliases(
             nextContent,
             category ?? existingDoc.category ?? undefined,
-            tags,
+            mergedTags.length > 0 ? mergedTags : undefined,
             options.aliases,
             title ?? existingDoc.title ?? undefined,
             abstract,
             summary,
           );
-          const fullContent = buildFullContent(nextContent, category ?? existingDoc.category ?? undefined, tags, mergedAliases);
+          const effectiveTags = mergedTags.length > 0 ? mergedTags : undefined;
+          const fullContent = buildFullContent(nextContent, category ?? existingDoc.category ?? undefined, effectiveTags, mergedAliases);
           const newHash = hashContent(fullContent);
 
           try {
@@ -566,7 +569,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
             content: nextContent,
             title: title ?? existingDoc.title,
             category: category ?? existingDoc.category ?? undefined,
-            tags,
+            tags: effectiveTags,
             created: existingDoc.createdAt,
             importance: Math.max(existingDoc.importance, importance),
             confidence: Math.max(existingDoc.confidence, confidence),
@@ -813,7 +816,8 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
   }
 
   async function listObservations(limit: number, minConfidence = 0): Promise<RecalledMemory[]> {
-    return scanDocumentsExtended(db, Math.max(limit, 1), collection, scope, "observation")
+    const oversample = minConfidence > 0 ? Math.max(limit * 5, 50) : Math.max(limit, 1);
+    return scanDocumentsExtended(db, oversample, collection, scope, "observation")
       .filter((item) => item.confidence >= minConfidence)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, limit)
@@ -1052,7 +1056,7 @@ export async function createMemoryStore(config: MemoryStoreConfig): Promise<Memo
           categoryBoost;
         return {
           id: item.id,
-          content: item.content,
+          content: parseStoredDocumentContent(item.content).content,
           category: item.category ?? undefined,
           score,
           abstract: item.abstract ?? undefined,
