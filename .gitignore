@@ -7,3 +7,6 @@ skills-lock.json
 
 .qmd-local/
 .qmd-test/
+
+# eval datasets
+scripts/locomo10.json
